@@ -247,7 +247,7 @@ class _ClientsScreenState extends ConsumerState<ClientsScreen>
                                   icon: Icons.people_outline,
                                 )
                               : ListView.separated(
-                                  padding: const EdgeInsets.only(bottom: 16),
+                                  padding: const EdgeInsets.only(bottom: 120),
                                   separatorBuilder: (context, idx) =>
                                       const SizedBox(height: 4),
                                   itemCount: filteredClients.length,

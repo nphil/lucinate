@@ -365,6 +365,7 @@ class RealApiService implements IApiService {
             object: object,
             method: method,
             params: params,
+            // ignore: use_build_context_synchronously
             context: context,
           );
         } on DioException catch (e, stack) {

@@ -413,7 +413,7 @@ class _InterfacesScreenState extends ConsumerState<InterfacesScreen> {
                       _buildWirelessInterfacesList(),
                       SliverToBoxAdapter(
                         child: Padding(
-                          padding: EdgeInsets.only(bottom: 16),
+                          padding: EdgeInsets.only(bottom: 120),
                           child: SizedBox.shrink(),
                         ),
                       ),

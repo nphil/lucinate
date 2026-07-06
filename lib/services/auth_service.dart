@@ -59,6 +59,7 @@ class RealAuthService implements IAuthService {
             user,
             pass,
             useHttps,
+            // ignore: use_build_context_synchronously
             context: context,
           );
 
@@ -91,6 +92,7 @@ class RealAuthService implements IAuthService {
             user,
             pass,
             useHttps,
+            // ignore: use_build_context_synchronously
             context: context,
           );
           _sysauth = token;
