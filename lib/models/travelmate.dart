@@ -51,13 +51,21 @@ class TravelmateStatus {
         final device = parts.isNotEmpty ? parts[0].trim() : '';
         var ssid = parts.length > 1 ? parts[1].trim() : '';
         if (ssid == '-') ssid = '';
-        final runFlags = (d['run_flags'] ?? '').toString();
+        final statusText = (d['travelmate_status'] ?? '').toString();
+        final lowerStatus = statusText.toLowerCase();
+        final connected = lowerStatus.startsWith('connected');
+        // A captive portal shows up as the connectivity check failing
+        // ("net nok") or an explicit "captive" state — NOT the run_flags
+        // "captive: ✔", which only means captive DETECTION is enabled. When the
+        // status reports "net ok", the internet works and there is no portal.
+        final captive = connected &&
+            (lowerStatus.contains('captive') || lowerStatus.contains('nok'));
         return TravelmateStatus(
           enabled: enabled,
-          statusText: (d['travelmate_status'] ?? '').toString(),
+          statusText: statusText,
           activeSsid: ssid,
           activeDevice: device == '-' ? '' : device,
-          captive: runFlags.contains('captive: ✔'),
+          captive: captive,
           subnet: (d['station_subnet'] ?? '').toString(),
         );
       }

@@ -1639,7 +1639,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 return RefreshIndicator(
                   onRefresh: () => appState.fetchDashboardData(),
                   child: SingleChildScrollView(
-                    physics: const AlwaysScrollableScrollPhysics(),
+                    // No vertical scroll on the dashboard and no iOS bounce —
+                    // clamp so it stays put while pull-to-refresh still works.
+                    physics: const AlwaysScrollableScrollPhysics(
+                      parent: ClampingScrollPhysics(),
+                    ),
                     child: SizedBox(
                       height: constraints.maxHeight,
                       child: Padding(

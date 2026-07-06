@@ -25,7 +25,7 @@ class LuCIApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final appState = ref.watch(appStateProvider);
     return MaterialApp(
-      title: 'LuCI Mobile',
+      title: 'Lucinate',
       // iOS-native scroll feel everywhere: rubber-band bounce, no Android
       // overscroll glow, Cupertino scrollbar behaviour.
       scrollBehavior: const _IOSScrollBehavior(),

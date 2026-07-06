@@ -87,7 +87,7 @@ class _SplashScreenState extends State<SplashScreen>
               ),
               const SizedBox(height: 32),
               Text(
-                'LuCI Mobile',
+                'Lucinate',
                 style: theme.textTheme.headlineLarge?.copyWith(
                   color: colorScheme.onPrimaryContainer,
                   fontWeight: FontWeight.bold,
