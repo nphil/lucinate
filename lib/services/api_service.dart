@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -287,7 +288,104 @@ class RealApiService implements IApiService {
     );
   }
 
+  // --- Concurrency gate + transient retry for RPC calls ---
+  //
+  // OpenWrt's uhttpd serves the LuCI CGI ubus bridge with a small process cap
+  // (uhttpd -n 3 on the target router). Firing many parallel calls — or any
+  // calls over a flaky, high-latency link like hotel Wi-Fi + Tailscale —
+  // overruns it and connections get reset ("Connection reset by peer"). We cap
+  // client-side concurrency to keep within uhttpd's budget, and retry transient
+  // network failures with backoff so a single reset doesn't surface as an error.
+  static const int _maxConcurrentRpc = 3;
+  static int _rpcInFlight = 0;
+  static final List<Completer<void>> _rpcQueue = [];
+
+  static Future<void> _acquireRpcSlot() async {
+    if (_rpcInFlight < _maxConcurrentRpc) {
+      _rpcInFlight++;
+      return;
+    }
+    final completer = Completer<void>();
+    _rpcQueue.add(completer);
+    await completer.future;
+    _rpcInFlight++;
+  }
+
+  static void _releaseRpcSlot() {
+    _rpcInFlight--;
+    if (_rpcQueue.isNotEmpty) {
+      _rpcQueue.removeAt(0).complete();
+    }
+  }
+
+  /// Whether a Dio failure is a transient network condition worth retrying
+  /// (as opposed to a real HTTP/RPC error we should surface immediately).
+  static bool _isTransient(DioException e) {
+    switch (e.type) {
+      case DioExceptionType.connectionTimeout:
+      case DioExceptionType.sendTimeout:
+      case DioExceptionType.receiveTimeout:
+      case DioExceptionType.connectionError:
+        return true;
+      case DioExceptionType.unknown:
+        final err = e.error;
+        if (err is SocketException || err is HttpException) return true;
+        final msg = (err?.toString() ?? e.message ?? '').toLowerCase();
+        return msg.contains('reset') ||
+            msg.contains('closed') ||
+            msg.contains('broken pipe') ||
+            msg.contains('connection');
+      default:
+        return false;
+    }
+  }
+
   Future<dynamic> callWithContext(
+    String ipAddress,
+    String sysauth,
+    bool useHttps, {
+    required String object,
+    required String method,
+    Map<String, dynamic>? params,
+    BuildContext? context,
+  }) async {
+    await _acquireRpcSlot();
+    try {
+      DioException? lastError;
+      for (var attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+          // Backoff: 300ms, 600ms.
+          await Future.delayed(Duration(milliseconds: 300 * attempt));
+        }
+        try {
+          return await _postRpc(
+            ipAddress,
+            sysauth,
+            useHttps,
+            object: object,
+            method: method,
+            params: params,
+            context: context,
+          );
+        } on DioException catch (e, stack) {
+          lastError = e;
+          if (!_isTransient(e) || attempt == 2) {
+            Logger.exception('API call failed', e, stack);
+            rethrow;
+          }
+          Logger.warning(
+            'Transient RPC error on $object.$method '
+            '(attempt ${attempt + 1}/3): ${e.message ?? e.type.name}',
+          );
+        }
+      }
+      throw lastError!;
+    } finally {
+      _releaseRpcSlot();
+    }
+  }
+
+  Future<dynamic> _postRpc(
     String ipAddress,
     String sysauth,
     bool useHttps, {
@@ -306,37 +404,30 @@ class RealApiService implements IApiService {
       'params': [sysauth, object, method, params ?? {}],
     };
 
-    try {
-      final response = await client.post(
-        url.toString(),
-        data: jsonEncode(rpcPayload),
-        options: Options(
-          headers: {'Content-Type': 'application/json'},
-        ),
-      );
+    final response = await client.post(
+      url.toString(),
+      data: jsonEncode(rpcPayload),
+      options: Options(
+        headers: {'Content-Type': 'application/json'},
+      ),
+    );
 
-      if (response.statusCode == 200) {
-        final decoded = response.data is String
-            ? jsonDecode(response.data as String)
-            : response.data;
-        if (decoded['error'] != null) {
-          throw Exception('RPC error: ${decoded['error']['message']}');
-        }
-        // Return in LuCI RPC format: [status, data]
-        final result = decoded['result'];
-        if (result is List && result.isNotEmpty) {
-          // Result is already in [status, data] format
-          return result;
-        } else {
-          // Wrap single result in format: [0, data]
-          return [0, result];
-        }
-      } else {
-        throw Exception('Failed to call RPC: HTTP ${response.statusCode}');
+    if (response.statusCode == 200) {
+      final decoded = response.data is String
+          ? jsonDecode(response.data as String)
+          : response.data;
+      if (decoded['error'] != null) {
+        throw Exception('RPC error: ${decoded['error']['message']}');
       }
-    } on DioException catch (e, stack) {
-      Logger.exception('API call failed', e, stack);
-      rethrow;
+      // Return in LuCI RPC format: [status, data]
+      final result = decoded['result'];
+      if (result is List && result.isNotEmpty) {
+        return result;
+      } else {
+        return [0, result];
+      }
+    } else {
+      throw Exception('Failed to call RPC: HTTP ${response.statusCode}');
     }
   }
 

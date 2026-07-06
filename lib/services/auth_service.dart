@@ -42,64 +42,77 @@ class RealAuthService implements IAuthService {
     bool useHttps, {
     BuildContext? context,
   }) async {
-    try {
-      // Check if the API service is RealApiService to use protocol detection
-      if (_apiService is RealApiService) {
-        final realApiService = _apiService;
-        final loginResult = await realApiService.loginWithProtocolDetection(
-          ip,
-          user,
-          pass,
-          useHttps,
-          context: context,
-        );
+    // Retry transient network failures (common on flaky hotel Wi-Fi / Tailscale
+    // links) so auto-login on resume doesn't drop to the login screen for a
+    // momentary blip. Credential rejection (server reached, no token) is NOT
+    // retried, so a wrong password still fails fast.
+    for (var attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        await Future.delayed(Duration(milliseconds: 500 * attempt));
+      }
+      try {
+        // Check if the API service is RealApiService to use protocol detection
+        if (_apiService is RealApiService) {
+          final realApiService = _apiService;
+          final loginResult = await realApiService.loginWithProtocolDetection(
+            ip,
+            user,
+            pass,
+            useHttps,
+            context: context,
+          );
 
-        if (loginResult.token != null) {
-          _sysauth = loginResult.token;
+          if (loginResult.token != null) {
+            _sysauth = loginResult.token;
+            _ipAddress = ip;
+            _useHttps = loginResult.actualUseHttps; // Use the detected protocol
+
+            await _secureStorageService.saveCredentials(
+              ipAddress: ip,
+              username: user,
+              password: pass,
+              useHttps: loginResult.actualUseHttps, // Save the detected protocol
+            );
+
+            if (loginResult.actualUseHttps != useHttps) {
+              Logger.info(
+                'Protocol changed from ${useHttps ? "HTTPS" : "HTTP"} to ${loginResult.actualUseHttps ? "HTTPS" : "HTTP"} due to redirect',
+              );
+            }
+
+            return true;
+          }
+          // Reached the server but got no token -> credentials rejected.
+          return false;
+        } else {
+          // Fallback for mock service
+          final token = await _apiService.login(
+            ip,
+            user,
+            pass,
+            useHttps,
+            context: context,
+          );
+          _sysauth = token;
           _ipAddress = ip;
-          _useHttps = loginResult.actualUseHttps; // Use the detected protocol
+          _useHttps = useHttps;
 
           await _secureStorageService.saveCredentials(
             ipAddress: ip,
             username: user,
             password: pass,
-            useHttps: loginResult.actualUseHttps, // Save the detected protocol
+            useHttps: useHttps,
           );
-
-          if (loginResult.actualUseHttps != useHttps) {
-            Logger.info(
-              'Protocol changed from ${useHttps ? "HTTPS" : "HTTP"} to ${loginResult.actualUseHttps ? "HTTPS" : "HTTP"} due to redirect',
-            );
-          }
 
           return true;
         }
-        return false;
-      } else {
-        // Fallback for mock service
-        final token = await _apiService.login(
-          ip,
-          user,
-          pass,
-          useHttps,
-          context: context,
-        );
-        _sysauth = token;
-        _ipAddress = ip;
-        _useHttps = useHttps;
-
-        await _secureStorageService.saveCredentials(
-          ipAddress: ip,
-          username: user,
-          password: pass,
-          useHttps: useHttps,
-        );
-
-        return true;
+      } catch (e) {
+        // Network/transient error -> back off and retry before giving up.
+        Logger.warning('Login attempt ${attempt + 1}/3 failed: $e');
+        if (attempt == 2) return false;
       }
-    } catch (e) {
-      return false;
     }
+    return false;
   }
 
   @override
