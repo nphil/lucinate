@@ -510,35 +510,44 @@ class RealApiService implements IApiService {
         final wirelessData = wirelessResult[1] as Map<String, dynamic>?;
         if (wirelessData == null) return {};
 
-        final result = <String, Set<String>>{};
-
-        // For each wireless radio, get the associated stations
+        // Collect AP-mode interfaces only. A station-mode interface is the
+        // router's OWN uplink to an upstream AP (e.g. travelmate) — its
+        // "associated station" is that upstream AP, not a client of this
+        // router — so it must be excluded or it shows up as an "Unknown" client.
+        final apInterfaces = <String>[];
         for (final entry in wirelessData.entries) {
           final radioData = entry.value as Map<String, dynamic>?;
-          if (radioData == null || radioData['interfaces'] == null) continue;
-
-          final interfaces = radioData['interfaces'] as List?;
+          final interfaces = radioData?['interfaces'] as List?;
           if (interfaces == null) continue;
-
           for (final iface in interfaces) {
             if (iface is Map<String, dynamic>) {
               final ifname = iface['ifname'] as String?;
-              if (ifname != null) {
-                // Fetch associated stations for this interface
-                final stations = await fetchAssociatedStationsWithContext(
-                  ipAddress: ipAddress,
-                  sysauth: sysauth,
-                  useHttps: useHttps,
-                  interface: ifname,
-                  context: context?.mounted == true ? context : null,
-                );
-                if (stations.isNotEmpty) {
-                  result[ifname] = stations.toSet();
-                }
+              final mode = (iface['config'] as Map?)?['mode'];
+              if (ifname != null && mode != 'sta') {
+                apInterfaces.add(ifname);
               }
             }
           }
         }
+
+        // Query the AP interfaces concurrently (the RPC layer caps real
+        // concurrency) — much faster than awaiting one-by-one over a
+        // high-latency link.
+        final result = <String, Set<String>>{};
+        await Future.wait(
+          apInterfaces.map((ifname) async {
+            final stations = await fetchAssociatedStationsWithContext(
+              ipAddress: ipAddress,
+              sysauth: sysauth,
+              useHttps: useHttps,
+              interface: ifname,
+              context: context?.mounted == true ? context : null,
+            );
+            if (stations.isNotEmpty) {
+              result[ifname] = stations.toSet();
+            }
+          }),
+        );
         return result;
       }
       return {};

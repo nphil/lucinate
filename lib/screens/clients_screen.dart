@@ -78,6 +78,9 @@ class _ClientsScreenState extends ConsumerState<ClientsScreen>
     }
     return FutureBuilder<List<Client>>(
       future: future,
+      // Show the last-loaded clients instantly on re-entry while the fresh
+      // fetch runs in the background, instead of a blank skeleton every time.
+      initialData: watchedAppState.cachedClients,
       builder: (context, snapshot) {
         final aggregatedClients = snapshot.data ?? [];
         return Scaffold(

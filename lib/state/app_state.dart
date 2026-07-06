@@ -1399,6 +1399,11 @@ class AppState extends ChangeNotifier {
 
   /// Aggregates DHCP leases across all configured routers and classifies clients
   /// as wireless if their MAC appears in any router's associated stations list.
+  /// Last successfully-loaded client list. Shown instantly when the Clients
+  /// screen is re-opened while a fresh fetch runs in the background.
+  List<Client>? _cachedClients;
+  List<Client>? get cachedClients => _cachedClients;
+
   Future<List<Client>> fetchAggregatedClients() async {
     try {
       // Build a union of wireless MACs across all routers
@@ -1455,6 +1460,7 @@ class AppState extends ChangeNotifier {
         if (cmpType != 0) return cmpType;
         return a.hostname.toLowerCase().compareTo(b.hostname.toLowerCase());
       });
+      _cachedClients = list;
       return list;
     } catch (e, stack) {
       Logger.exception('Failed to aggregate clients', e, stack);
@@ -1597,6 +1603,7 @@ class AppState extends ChangeNotifier {
         if (cmpType != 0) return cmpType;
         return a.hostname.toLowerCase().compareTo(b.hostname.toLowerCase());
       });
+      _cachedClients = clients;
       return clients;
     } catch (e, stack) {
       Logger.exception('Failed to fetch clients for selected router', e, stack);
