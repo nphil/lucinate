@@ -11,6 +11,8 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:luci_mobile/config/app_config.dart';
 import 'package:luci_mobile/screens/manage_routers_screen.dart';
+import 'package:luci_mobile/screens/tailscale_screen.dart';
+import 'package:luci_mobile/screens/travelmate_screen.dart';
 import 'package:luci_mobile/utils/http_client_manager.dart';
 import 'package:luci_mobile/state/app_state.dart';
 
@@ -324,6 +326,39 @@ class _MoreScreenState extends ConsumerState<MoreScreen> {
                   ],
                 );
               },
+            ),
+            const LuciSectionHeader('Network Tools'),
+            _MoreScreenSection(
+              tiles: [
+                _buildMoreTile(
+                  context,
+                  icon: Icons.travel_explore_outlined,
+                  iconColor: Theme.of(context).colorScheme.primary,
+                  title: 'Travelmate',
+                  subtitle: 'Repeat hotel/other Wi-Fi as uplink',
+                  onTap: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (context) => const TravelmateScreen(),
+                      ),
+                    );
+                  },
+                ),
+                _buildMoreTile(
+                  context,
+                  icon: Icons.vpn_lock_outlined,
+                  iconColor: Theme.of(context).colorScheme.primary,
+                  title: 'Tailscale',
+                  subtitle: 'Status, exit node, routes & DNS',
+                  onTap: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (context) => const TailscaleScreen(),
+                      ),
+                    );
+                  },
+                ),
+              ],
             ),
             const LuciSectionHeader('Application'),
             _MoreScreenSection(

@@ -1,0 +1,80 @@
+name: Build iOS IPA (unsigned)
+
+# Builds an UNSIGNED .ipa for sideloading (AltStore / Feather / Sideloadly),
+# mirroring the Stashy pipeline: no Apple Developer account or signing secrets
+# needed. The IPA is uploaded as a workflow artifact and attached to a release.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'android/**'
+      - 'fastlane/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build unsigned IPA
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze (non-blocking)
+        run: flutter analyze || true
+
+      - name: Build unsigned iOS app
+        run: flutter build ios --release --no-codesign
+
+      - name: Package into IPA
+        run: |
+          set -euo pipefail
+          APP_PATH="build/ios/iphoneos/Runner.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "❌ Runner.app not found — build failed."
+            find build/ios -maxdepth 3 2>/dev/null || true
+            exit 1
+          fi
+          # Completeness gate: a real compile/link failure can leave a shell .app.
+          EXE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist" 2>/dev/null || echo Runner)
+          if [ ! -s "$APP_PATH/$EXE" ]; then
+            echo "❌ App executable '$EXE' missing/empty — build failed."
+            exit 1
+          fi
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qr lucinate.ipa Payload
+          echo "IPA size: $(du -sh lucinate.ipa | cut -f1)"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lucinate-ipa
+          path: lucinate.ipa
+          if-no-files-found: error
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios-${{ github.run_number }}
+          name: iOS build ${{ github.run_number }}
+          body: |
+            Unsigned IPA — sideload with AltStore / Feather / Sideloadly.
+            Built from `${{ github.sha }}`.
+          files: lucinate.ipa

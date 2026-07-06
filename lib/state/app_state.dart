@@ -251,6 +251,46 @@ class AppState extends ChangeNotifier {
   }
 
   String? get sysauth => _authService?.sysauth;
+
+  /// Generic authenticated ubus RPC for feature modules (e.g. tailscale,
+  /// travelmate). Returns the unwrapped `data` element of LuCI's
+  /// `[status, data]` response, or throws if not connected / the call is
+  /// denied or reports a non-zero status.
+  Future<dynamic> rpcCall({
+    required String object,
+    required String method,
+    Map<String, dynamic>? params,
+  }) async {
+    final dynamic result;
+    if (_reviewerModeEnabled) {
+      result = await _apiService!.callSimple(
+        object,
+        method,
+        params ?? const {},
+      );
+    } else {
+      final router = _routerService?.selectedRouter;
+      final token = _authService?.sysauth;
+      if (router == null || token == null) {
+        throw Exception('Not connected to a router');
+      }
+      result = await _apiService!.call(
+        router.ipAddress,
+        token,
+        router.useHttps,
+        object: object,
+        method: method,
+        params: params,
+      );
+    }
+    if (result is List) {
+      final status = result.isNotEmpty ? result[0] : -1;
+      if (status == 0) return result.length > 1 ? result[1] : null;
+      throw Exception('RPC $object.$method failed (status $status)');
+    }
+    return result;
+  }
+
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
 
