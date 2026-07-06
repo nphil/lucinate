@@ -39,6 +39,24 @@ jobs:
       - name: Analyze (errors are fatal, warnings/infos are not)
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
+      - name: Generate app icon from SVG
+        run: |
+          set -euo pipefail
+          brew install librsvg
+          ICONSET="ios/Runner/Assets.xcassets/AppIcon.appiconset"
+          for pair in \
+            "AppIcon-20@2x.png:40" "AppIcon-20@2x~ipad.png:40" "AppIcon-20@3x.png:60" "AppIcon-20~ipad.png:20" \
+            "AppIcon-29.png:29" "AppIcon-29@2x.png:58" "AppIcon-29@2x~ipad.png:58" "AppIcon-29@3x.png:87" "AppIcon-29~ipad.png:29" \
+            "AppIcon-40@2x.png:80" "AppIcon-40@2x~ipad.png:80" "AppIcon-40@3x.png:120" "AppIcon-40~ipad.png:40" \
+            "AppIcon-60@2x~car.png:120" "AppIcon-60@3x~car.png:180" \
+            "AppIcon-83.5@2x~ipad.png:167" \
+            "AppIcon@2x.png:120" "AppIcon@2x~ipad.png:152" "AppIcon@3x.png:180" \
+            "AppIcon~ios-marketing.png:1024" "AppIcon~ipad.png:76"; do
+            f="${pair%%:*}"; s="${pair##*:}"
+            rsvg-convert -w "$s" -h "$s" ios/AppIcon.svg -o "$ICONSET/$f"
+          done
+          echo "Generated app icons:"; ls "$ICONSET" | grep -c '\.png$'
+
       - name: Build unsigned iOS app
         run: flutter build ios --release --no-codesign
 

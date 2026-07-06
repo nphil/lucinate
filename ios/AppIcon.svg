@@ -1,0 +1,19 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8A5CFF"/>
+      <stop offset="0.52" stop-color="#5C6CF5"/>
+      <stop offset="1" stop-color="#17C0D4"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <!-- Location pin (travel) -->
+  <path d="M512 818 C 398 606 330 524 330 430 A 182 182 0 1 1 694 430 C 694 524 626 606 512 818 Z"
+        fill="#FFFFFF"/>
+  <!-- Wi-Fi broadcast (router) carved out of the pin -->
+  <g fill="none" stroke="url(#bg)" stroke-width="30" stroke-linecap="round">
+    <path d="M 456 452 A 78 78 0 0 1 568 452"/>
+    <path d="M 420 414 A 130 130 0 0 1 604 414"/>
+  </g>
+  <circle cx="512" cy="476" r="24" fill="url(#bg)"/>
+</svg>
