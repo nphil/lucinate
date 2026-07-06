@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:luci_mobile/design/luci_design_system.dart';
@@ -245,7 +247,7 @@ class _TravelmateScreenState extends ConsumerState<TravelmateScreen> {
   // ---- Add flow ----
 
   Future<void> _showAddFlow(BuildContext context, TravelmateController c) async {
-    c.scan();
+    unawaited(c.scan());
     final selected = await showModalBottomSheet<WifiScanResult>(
       context: context,
       showDragHandle: true,
@@ -319,7 +321,7 @@ class _TravelmateScreenState extends ConsumerState<TravelmateScreen> {
       },
     );
 
-    if (selected == null || !mounted) return;
+    if (selected == null || !context.mounted) return;
 
     String password = '';
     if (selected.encrypted) {
