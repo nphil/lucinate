@@ -1631,59 +1631,38 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
               ),
             );
           } else {
-            // Portrait mode: a single non-scrolling page. Every card gets a
-            // proportional (flex) slot so the whole thing always fits the
-            // viewport exactly; each non-hero card is wrapped in a scale-down
-            // FittedBox so it shrinks to its slot instead of overflowing, and
-            // its text is guarded from clipping. The throughput chart is the
-            // hero and fills its slot directly.
+            // Portrait mode: a single non-scrolling page. Cards fill the width
+            // (stretch) with symmetric side padding so nothing is left-shifted,
+            // and the throughput chart takes the remaining space as the hero.
             return LayoutBuilder(
               builder: (context, constraints) {
-                final cardWidth = constraints.maxWidth - 32;
-                Widget fitted(Widget card) => FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: SizedBox(width: cardWidth, child: card),
-                );
                 return RefreshIndicator(
                   onRefresh: () => appState.fetchDashboardData(),
                   child: SingleChildScrollView(
                     physics: const AlwaysScrollableScrollPhysics(),
                     child: SizedBox(
                       height: constraints.maxHeight,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: [
-                          const SizedBox(height: 8),
-                          Expanded(
-                            flex: 13,
-                            child: fitted(_buildDeviceInfoCard(appState)),
-                          ),
-                          const SizedBox(height: 6),
-                          Expanded(
-                            flex: 42,
-                            child: SizedBox(
-                              width: cardWidth,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            const SizedBox(height: 8),
+                            _buildDeviceInfoCard(appState),
+                            const SizedBox(height: 8),
+                            Expanded(
                               child: _buildRealtimeThroughputCard(appState),
                             ),
-                          ),
-                          const SizedBox(height: 6),
-                          Expanded(
-                            flex: 15,
-                            child: fitted(_buildSystemVitalsCard(appState)),
-                          ),
-                          const SizedBox(height: 6),
-                          Expanded(
-                            flex: 16,
-                            child: fitted(_buildWirelessNetworksCard(appState)),
-                          ),
-                          const SizedBox(height: 6),
-                          Expanded(
-                            flex: 16,
-                            child: fitted(_buildInterfaceStatusCards(appState)),
-                          ),
-                          // Clear the floating glass navigation bar.
-                          const SizedBox(height: 100),
-                        ],
+                            const SizedBox(height: 8),
+                            _buildSystemVitalsCard(appState),
+                            const SizedBox(height: 8),
+                            _buildWirelessNetworksCard(appState),
+                            const SizedBox(height: 8),
+                            _buildInterfaceStatusCards(appState),
+                            // Clear the floating glass navigation bar.
+                            const SizedBox(height: 96),
+                          ],
+                        ),
                       ),
                     ),
                   ),
