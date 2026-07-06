@@ -14,9 +14,10 @@ class GlassNavItem {
 }
 
 /// A floating, translucent "liquid glass" bottom navigation bar, styled after
-/// iOS 26 / Apple Music: a rounded capsule that sits near the bottom edge with
-/// content blurring beneath it, larger tap targets, and the selected item
-/// highlighted with the theme's accent colour.
+/// iOS 26 / Apple Music: a fully-rounded (stadium) capsule that sits near the
+/// bottom edge with content blurring beneath it. The selected item's highlight
+/// pill is concentric with the dock (both fully rounded) and evenly inset on all
+/// sides so the end items don't crowd the dock's corners.
 class LiquidGlassNavBar extends StatelessWidget {
   final int selectedIndex;
   final ValueChanged<int> onDestinationSelected;
@@ -33,6 +34,13 @@ class LiquidGlassNavBar extends StatelessWidget {
     this.isEnabled,
   });
 
+  // Dock geometry. A full stadium (radius == height/2) reads as harmonious with
+  // the phone's rounded screen corners. The selection pill is inset [_inset] on
+  // every side so it's concentric and evenly spaced from the dock edge.
+  static const double _height = 62;
+  static const double _inset = 8;
+  static const double _gap = 6; // total space between adjacent pills
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -41,16 +49,16 @@ class LiquidGlassNavBar extends StatelessWidget {
     return SafeArea(
       top: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+        padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
         child: ClipRRect(
-          borderRadius: BorderRadius.circular(30),
+          borderRadius: BorderRadius.circular(_height / 2),
           child: BackdropFilter(
             filter: ImageFilter.blur(sigmaX: 30, sigmaY: 30),
             child: Container(
-              height: 66,
+              height: _height,
               decoration: BoxDecoration(
                 color: scheme.surface.withValues(alpha: isDark ? 0.55 : 0.72),
-                borderRadius: BorderRadius.circular(30),
+                borderRadius: BorderRadius.circular(_height / 2),
                 border: Border.all(
                   color: (isDark ? Colors.white : Colors.black)
                       .withValues(alpha: 0.12),
@@ -84,36 +92,55 @@ class LiquidGlassNavBar extends StatelessWidget {
         ? scheme.onSurfaceVariant.withValues(alpha: 0.35)
         : (selected ? scheme.primary : scheme.onSurfaceVariant);
     final item = items[i];
+    final isFirst = i == 0;
+    final isLast = i == items.length - 1;
+
+    // Pill height = dock height minus the top/bottom inset; a stadium radius on
+    // it keeps it concentric with the dock.
+    final pillRadius = (_height - _inset * 2) / 2;
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: enabled ? () => onDestinationSelected(i) : null,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOut,
-        margin: const EdgeInsets.symmetric(horizontal: 5, vertical: 8),
-        decoration: BoxDecoration(
-          color: selected
-              ? scheme.primary.withValues(alpha: 0.15)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(20),
+      child: Padding(
+        padding: EdgeInsets.only(
+          top: _inset,
+          bottom: _inset,
+          left: isFirst ? _inset : _gap / 2,
+          right: isLast ? _inset : _gap / 2,
         ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(selected ? item.selectedIcon : item.icon, color: color, size: 26),
-            const SizedBox(height: 2),
-            Text(
-              item.label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOut,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: selected
+                ? scheme.primary.withValues(alpha: 0.16)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(pillRadius),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                selected ? item.selectedIcon : item.icon,
                 color: color,
-                fontSize: 11,
-                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                size: 25,
               ),
-            ),
-          ],
+              const SizedBox(height: 2),
+              Text(
+                item.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 11,
+                  fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

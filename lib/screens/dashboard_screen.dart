@@ -6,6 +6,8 @@ import 'package:luci_mobile/main.dart';
 import 'package:luci_mobile/widgets/luci_app_bar.dart';
 import 'package:luci_mobile/widgets/luci_animation_system.dart';
 import 'package:luci_mobile/models/router.dart' as model;
+import 'package:luci_mobile/screens/tailscale_screen.dart';
+import 'package:luci_mobile/screens/travelmate_screen.dart';
 
 class DashboardScreen extends ConsumerStatefulWidget {
   const DashboardScreen({super.key});
@@ -56,26 +58,24 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     });
   }
 
+  // Fade-gradient + arrow overlays were removed for a cleaner, iOS-native
+  // horizontal scroll, so these keep the flags off.
   void _updateWirelessArrows() {
-    if (!_wirelessScrollController.hasClients) return;
-    final max = _wirelessScrollController.position.maxScrollExtent;
-    final min = _wirelessScrollController.position.minScrollExtent;
-    final offset = _wirelessScrollController.offset;
-    setState(() {
-      _showWirelessLeftArrow = offset > min + 2;
-      _showWirelessRightArrow = offset < max - 2;
-    });
+    if (_showWirelessLeftArrow || _showWirelessRightArrow) {
+      setState(() {
+        _showWirelessLeftArrow = false;
+        _showWirelessRightArrow = false;
+      });
+    }
   }
 
   void _updateWanArrows() {
-    if (!_wanScrollController.hasClients) return;
-    final max = _wanScrollController.position.maxScrollExtent;
-    final min = _wanScrollController.position.minScrollExtent;
-    final offset = _wanScrollController.offset;
-    setState(() {
-      _showWanLeftArrow = offset > min + 2;
-      _showWanRightArrow = offset < max - 2;
-    });
+    if (_showWanLeftArrow || _showWanRightArrow) {
+      setState(() {
+        _showWanLeftArrow = false;
+        _showWanRightArrow = false;
+      });
+    }
   }
 
   @override
@@ -843,8 +843,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 clipBehavior: Clip.antiAlias,
                 child: InkWell(
                   borderRadius: BorderRadius.circular(18),
-                  onLongPress: () {
-                    // Navigate to interfaces tab with the specific interface name
+                  onTap: () {
                     final appState = ref.read(appStateProvider);
                     appState.requestTab(2, interfaceToScroll: deviceName);
                   },
@@ -910,8 +909,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 clipBehavior: Clip.antiAlias,
                 child: InkWell(
                   borderRadius: BorderRadius.circular(18),
-                  onLongPress: () {
-                    // Navigate to interfaces tab with the specific interface name
+                  onTap: () {
                     final appState = ref.read(appStateProvider);
                     appState.requestTab(2, interfaceToScroll: device);
                   },
@@ -1125,10 +1123,25 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           clipBehavior: Clip.antiAlias,
           child: InkWell(
             borderRadius: BorderRadius.circular(18),
-            onLongPress: () {
-              // Navigate to interfaces tab with the specific interface name
-              final appState = ref.read(appStateProvider);
-              appState.requestTab(2, interfaceToScroll: name);
+            onTap: () {
+              final lower = name.toLowerCase();
+              if (lower == 'tailscale') {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (context) => const TailscaleScreen(),
+                  ),
+                );
+              } else if (lower == 'travel_wan') {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (context) => const TravelmateScreen(),
+                  ),
+                );
+              } else {
+                ref
+                    .read(appStateProvider)
+                    .requestTab(2, interfaceToScroll: name);
+              }
             },
             child: Padding(
               padding: const EdgeInsets.symmetric(
