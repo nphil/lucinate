@@ -297,9 +297,9 @@ class _MoreScreenState extends ConsumerState<MoreScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: const LuciAppBar(title: 'More'),
+      appBar: const LuciAppBar(title: 'Settings'),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(vertical: LuciSpacing.sm),
+        padding: const EdgeInsets.only(top: LuciSpacing.sm, bottom: 120),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -379,10 +379,10 @@ class _MoreScreenState extends ConsumerState<MoreScreen> {
                 ),
                 _buildMoreTile(
                   context,
-                  icon: Icons.settings_outlined,
+                  icon: Icons.palette_outlined,
                   iconColor: Theme.of(context).colorScheme.primary,
-                  title: 'Settings',
-                  subtitle: 'Configure app preferences',
+                  title: 'App Customization',
+                  subtitle: 'Themes, appearance & dashboard',
                   onTap: () {
                     Navigator.of(context).push(
                       MaterialPageRoute(

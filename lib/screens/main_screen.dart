@@ -1,5 +1,3 @@
-import 'dart:ui' show ImageFilter;
-
 import 'package:flutter/material.dart';
 import 'package:luci_mobile/screens/dashboard_screen.dart';
 import 'package:luci_mobile/screens/clients_screen.dart';
@@ -7,6 +5,7 @@ import 'package:luci_mobile/screens/interfaces_screen.dart';
 import 'package:luci_mobile/screens/more_screen.dart';
 import 'package:luci_mobile/main.dart';
 import 'package:luci_mobile/widgets/luci_navigation_enhancements.dart';
+import 'package:luci_mobile/widgets/liquid_glass_nav_bar.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 class MainScreen extends ConsumerStatefulWidget {
@@ -112,74 +111,35 @@ class _MainScreenState extends ConsumerState<MainScreen> {
           final isRebooting = ref.watch(
             appStateProvider.select((state) => state.isRebooting),
           );
-          Color? getTabColor(int index) =>
-              (isRebooting && index != 3) ? Colors.grey.withAlpha(128) : null;
-          double getTabOpacity(int index) =>
-              (isRebooting && index != 3) ? 0.5 : 1.0;
-          return ClipRect(
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-              child: NavigationBar(
-                backgroundColor: Theme.of(
-                  context,
-                ).colorScheme.surface.withValues(alpha: 0.72),
-                elevation: 0,
-                surfaceTintColor: Colors.transparent,
-                onDestinationSelected: (index) {
-                  if (isRebooting && index != 3) {
-                    return; // Only allow 'More' tab
-                  }
-                  _onItemTapped(index);
-                },
-                selectedIndex: _selectedIndex,
-                destinations: [
-              NavigationDestination(
-                selectedIcon: Opacity(
-                  opacity: getTabOpacity(0),
-                  child: Icon(Icons.dashboard, color: getTabColor(0)),
-                ),
-                icon: Opacity(
-                  opacity: getTabOpacity(0),
-                  child: Icon(Icons.dashboard_outlined, color: getTabColor(0)),
-                ),
+          return LiquidGlassNavBar(
+            selectedIndex: _selectedIndex,
+            isEnabled: (index) => !isRebooting || index == 3,
+            onDestinationSelected: (index) {
+              if (isRebooting && index != 3) return; // Only 'Settings' allowed
+              _onItemTapped(index);
+            },
+            items: const [
+              GlassNavItem(
+                icon: Icons.dashboard_outlined,
+                selectedIcon: Icons.dashboard,
                 label: 'Dashboard',
               ),
-              NavigationDestination(
-                selectedIcon: Opacity(
-                  opacity: getTabOpacity(1),
-                  child: Icon(Icons.people, color: getTabColor(1)),
-                ),
-                icon: Opacity(
-                  opacity: getTabOpacity(1),
-                  child: Icon(Icons.people_outline, color: getTabColor(1)),
-                ),
+              GlassNavItem(
+                icon: Icons.people_outline,
+                selectedIcon: Icons.people,
                 label: 'Clients',
               ),
-              NavigationDestination(
-                selectedIcon: Opacity(
-                  opacity: getTabOpacity(2),
-                  child: Icon(Icons.lan, color: getTabColor(2)),
-                ),
-                icon: Opacity(
-                  opacity: getTabOpacity(2),
-                  child: Icon(Icons.lan_outlined, color: getTabColor(2)),
-                ),
+              GlassNavItem(
+                icon: Icons.lan_outlined,
+                selectedIcon: Icons.lan,
                 label: 'Interfaces',
               ),
-              NavigationDestination(
-                selectedIcon: Opacity(
-                  opacity: getTabOpacity(3),
-                  child: Icon(Icons.more_horiz),
-                ),
-                icon: Opacity(
-                  opacity: getTabOpacity(3),
-                  child: Icon(Icons.more_horiz_outlined),
-                ),
-                label: 'More',
+              GlassNavItem(
+                icon: Icons.settings_outlined,
+                selectedIcon: Icons.settings,
+                label: 'Settings',
               ),
             ],
-              ),
-            ),
           );
         },
       ),

@@ -29,8 +29,8 @@ class LuCIApp extends ConsumerWidget {
       // iOS-native scroll feel everywhere: rubber-band bounce, no Android
       // overscroll glow, Cupertino scrollbar behaviour.
       scrollBehavior: const _IOSScrollBehavior(),
-      theme: _buildTheme(Brightness.light),
-      darkTheme: _buildTheme(Brightness.dark),
+      theme: _buildTheme(appState.lightColorScheme),
+      darkTheme: _buildTheme(appState.darkColorScheme),
       themeMode: appState.themeMode,
       initialRoute: '/splash',
       routes: {
@@ -43,12 +43,9 @@ class LuCIApp extends ConsumerWidget {
   }
 }
 
-ThemeData _buildTheme(Brightness brightness) {
+ThemeData _buildTheme(ColorScheme scheme) {
   return ThemeData(
-    colorScheme: ColorScheme.fromSeed(
-      seedColor: Colors.blue,
-      brightness: brightness,
-    ),
+    colorScheme: scheme,
     useMaterial3: true,
     // Force iOS behaviours (Cupertino page transitions, adaptive controls) and
     // drop the Material ink ripple — the biggest "this isn't iOS" tell on taps.

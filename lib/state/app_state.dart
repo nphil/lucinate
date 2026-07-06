@@ -18,6 +18,7 @@ import 'package:luci_mobile/services/service_factory.dart';
 import 'package:luci_mobile/config/app_config.dart';
 import 'package:luci_mobile/utils/http_client_manager.dart';
 import 'package:luci_mobile/utils/logger.dart';
+import 'package:luci_mobile/design/app_themes.dart';
 
 class AppState extends ChangeNotifier {
   static AppState? _instance;
@@ -53,6 +54,12 @@ class AppState extends ChangeNotifier {
   // Theme mode state
   ThemeMode _themeMode = ThemeMode.system;
   static const String _themeModeKey = 'themeMode';
+
+  // Selected colour palettes (applied for light / dark mode respectively).
+  String _lightThemeId = AppThemes.defaultLightId;
+  String _darkThemeId = AppThemes.defaultDarkId;
+  static const String _lightThemeKey = 'lightThemeId';
+  static const String _darkThemeKey = 'darkThemeId';
 
   // Clients view mode (aggregate across routers)
   bool _clientsAggregateAllRouters = true;
@@ -90,6 +97,7 @@ class AppState extends ChangeNotifier {
     await _loadReviewerMode();
     _initializeServices();
     await _loadThemeMode();
+    await _loadThemeSelection();
     await loadRouters(); // Load routers on app start (sets selectedRouter)
     await _migrateGlobalDashboardPreferencesIfNeeded(); // Proactively migrate legacy prefs
     await _loadClientsViewMode();
@@ -190,6 +198,33 @@ class AppState extends ChangeNotifier {
   Future<void> setThemeMode(ThemeMode mode) async {
     _themeMode = mode;
     await _secureStorageService.writeValue(_themeModeKey, mode.name);
+    notifyListeners();
+  }
+
+  // --- Colour palette selection ---
+  Future<void> _loadThemeSelection() async {
+    final light = await _secureStorageService.readValue(_lightThemeKey);
+    final dark = await _secureStorageService.readValue(_darkThemeKey);
+    if (light != null) _lightThemeId = light;
+    if (dark != null) _darkThemeId = dark;
+    notifyListeners();
+  }
+
+  String get lightThemeId => _lightThemeId;
+  String get darkThemeId => _darkThemeId;
+
+  ColorScheme get lightColorScheme => AppThemes.lightById(_lightThemeId).colorScheme;
+  ColorScheme get darkColorScheme => AppThemes.darkById(_darkThemeId).colorScheme;
+
+  Future<void> setLightTheme(String id) async {
+    _lightThemeId = id;
+    await _secureStorageService.writeValue(_lightThemeKey, id);
+    notifyListeners();
+  }
+
+  Future<void> setDarkTheme(String id) async {
+    _darkThemeId = id;
+    await _secureStorageService.writeValue(_darkThemeKey, id);
     notifyListeners();
   }
 
