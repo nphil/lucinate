@@ -14,10 +14,9 @@ class GlassNavItem {
 }
 
 /// A floating, translucent "liquid glass" bottom navigation bar, styled after
-/// iOS 26 / Apple Music: a fully-rounded (stadium) capsule that sits near the
-/// bottom edge with content blurring beneath it. The selected item's highlight
-/// pill is concentric with the dock (both fully rounded) and evenly inset on all
-/// sides so the end items don't crowd the dock's corners.
+/// iOS 26 / Apple Music: a fully-rounded (stadium) capsule that sits just above
+/// the home indicator with content blurring beneath it. The selected item's
+/// highlight pill is concentric with the dock and evenly inset on all sides.
 class LiquidGlassNavBar extends StatelessWidget {
   final int selectedIndex;
   final ValueChanged<int> onDestinationSelected;
@@ -34,11 +33,11 @@ class LiquidGlassNavBar extends StatelessWidget {
     this.isEnabled,
   });
 
-  // Dock geometry. A full stadium (radius == height/2) reads as harmonious with
-  // the phone's rounded screen corners. The selection pill is inset [_inset] on
-  // every side so it's concentric and evenly spaced from the dock edge.
-  static const double _height = 62;
-  static const double _inset = 8;
+  // Dock geometry. Taller than a stock bar so the icon+label sit centred with
+  // breathing room. A full stadium (radius == height/2) reads as harmonious
+  // with the phone's rounded screen corners.
+  static const double _height = 68;
+  static const double _inset = 7; // pill inset from the dock edge on all sides
   static const double _gap = 6; // total space between adjacent pills
 
   @override
@@ -46,10 +45,18 @@ class LiquidGlassNavBar extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
+    // Sit just above the home indicator: pull the dock down into the bottom
+    // safe-area inset but keep a small clearance so the swipe bar isn't clipped.
+    final bottomInset = MediaQuery.of(context).padding.bottom;
+    final double bottomPad = bottomInset > 0
+        ? (bottomInset - 14).clamp(6.0, 40.0).toDouble()
+        : 10.0;
+
     return SafeArea(
       top: false,
+      bottom: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
+        padding: EdgeInsets.fromLTRB(14, 0, 14, bottomPad),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(_height / 2),
           child: BackdropFilter(
@@ -95,8 +102,7 @@ class LiquidGlassNavBar extends StatelessWidget {
     final isFirst = i == 0;
     final isLast = i == items.length - 1;
 
-    // Pill height = dock height minus the top/bottom inset; a stadium radius on
-    // it keeps it concentric with the dock.
+    // Stadium pill, concentric with the dock.
     final pillRadius = (_height - _inset * 2) / 2;
 
     return GestureDetector(
@@ -126,9 +132,9 @@ class LiquidGlassNavBar extends StatelessWidget {
               Icon(
                 selected ? item.selectedIcon : item.icon,
                 color: color,
-                size: 25,
+                size: 24,
               ),
-              const SizedBox(height: 2),
+              const SizedBox(height: 4),
               Text(
                 item.label,
                 maxLines: 1,
