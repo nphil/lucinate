@@ -5,15 +5,19 @@
       <stop offset="0.52" stop-color="#5C6CF5"/>
       <stop offset="1" stop-color="#17C0D4"/>
     </linearGradient>
+    <clipPath id="globe"><circle cx="512" cy="600" r="192"/></clipPath>
   </defs>
   <rect width="1024" height="1024" fill="url(#bg)"/>
-  <!-- Location pin (travel) -->
-  <path d="M512 818 C 398 606 330 524 330 430 A 182 182 0 1 1 694 430 C 694 524 626 606 512 818 Z"
-        fill="#FFFFFF"/>
-  <!-- Wi-Fi broadcast (router) carved out of the pin -->
-  <g fill="none" stroke="url(#bg)" stroke-width="30" stroke-linecap="round">
-    <path d="M 456 452 A 78 78 0 0 1 568 452"/>
-    <path d="M 420 414 A 130 130 0 0 1 604 414"/>
+  <!-- Wi-Fi broadcast rising off the globe (router / connectivity) -->
+  <g fill="none" stroke="#FFFFFF" stroke-width="44" stroke-linecap="round">
+    <path d="M 420 404 A 96 96 0 0 1 604 404"/>
+    <path d="M 360 372 A 168 168 0 0 1 664 372"/>
   </g>
-  <circle cx="512" cy="476" r="24" fill="url(#bg)"/>
+  <!-- Globe (the world) -->
+  <circle cx="512" cy="600" r="192" fill="#FFFFFF"/>
+  <g clip-path="url(#globe)" fill="none" stroke="url(#bg)" stroke-width="24" stroke-linecap="round">
+    <ellipse cx="512" cy="600" rx="192" ry="70"/>
+    <line x1="512" y1="408" x2="512" y2="792"/>
+    <ellipse cx="512" cy="600" rx="86" ry="192"/>
+  </g>
 </svg>
