@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 /// Models for the Travelmate module.
 ///
 /// Data sources on the router:
@@ -7,6 +5,8 @@ import 'dart:convert';
 ///   - `file read /var/run/travelmate/travelmate.runtime.json` -> live status
 ///   - `iwinfo scan {device}` -> nearby networks
 library;
+
+import 'dart:convert';
 
 class TravelmateStatus {
   /// From `travelmate.global.trm_enabled`.

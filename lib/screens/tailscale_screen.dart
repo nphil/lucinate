@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:luci_mobile/design/luci_design_system.dart';
-import 'package:luci_mobile/models/tailscale.dart';
 import 'package:luci_mobile/state/tailscale_controller.dart';
 import 'package:luci_mobile/widgets/luci_app_bar.dart';
 
