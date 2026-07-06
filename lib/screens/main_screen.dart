@@ -1,3 +1,5 @@
+import 'dart:ui' show ImageFilter;
+
 import 'package:flutter/material.dart';
 import 'package:luci_mobile/screens/dashboard_screen.dart';
 import 'package:luci_mobile/screens/clients_screen.dart';
@@ -98,6 +100,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
       });
     }
     return Scaffold(
+      extendBody: true,
       body: Center(
         child: LuciTabTransition(
           transitionKey: 'tab_$_selectedIndex',
@@ -113,13 +116,23 @@ class _MainScreenState extends ConsumerState<MainScreen> {
               (isRebooting && index != 3) ? Colors.grey.withAlpha(128) : null;
           double getTabOpacity(int index) =>
               (isRebooting && index != 3) ? 0.5 : 1.0;
-          return NavigationBar(
-            onDestinationSelected: (index) {
-              if (isRebooting && index != 3) return; // Only allow 'More' tab
-              _onItemTapped(index);
-            },
-            selectedIndex: _selectedIndex,
-            destinations: [
+          return ClipRect(
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+              child: NavigationBar(
+                backgroundColor: Theme.of(
+                  context,
+                ).colorScheme.surface.withValues(alpha: 0.72),
+                elevation: 0,
+                surfaceTintColor: Colors.transparent,
+                onDestinationSelected: (index) {
+                  if (isRebooting && index != 3) {
+                    return; // Only allow 'More' tab
+                  }
+                  _onItemTapped(index);
+                },
+                selectedIndex: _selectedIndex,
+                destinations: [
               NavigationDestination(
                 selectedIcon: Opacity(
                   opacity: getTabOpacity(0),
@@ -165,6 +178,8 @@ class _MainScreenState extends ConsumerState<MainScreen> {
                 label: 'More',
               ),
             ],
+              ),
+            ),
           );
         },
       ),
