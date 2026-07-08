@@ -100,6 +100,8 @@ struct ControlCenterSheet: View {
     @State private var travelmateController = TravelmateController()
     @State private var tailscaleController = TailscaleController()
 
+    @State private var showSettings = false
+
     /// Set when the user flips an AP off — confirmed via alert before applying.
     @State private var radioToDisable: QuickRadiosController.APRow?
 
@@ -113,7 +115,7 @@ struct ControlCenterSheet: View {
             ScrollView {
                 VStack(spacing: Spacing.md) {
                     connectionCard
-                    throughputCard
+                    ControlCenterThroughput()
                     if radiosController.loaded && !radiosController.radios.isEmpty {
                         radiosCard
                     }
@@ -128,12 +130,23 @@ struct ControlCenterSheet: View {
                 .padding(Spacing.md)
             }
             .background(theme.background)
-            .navigationTitle(appState.hostname)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
+                ToolbarItem(placement: .principal) {
+                    routerSwitcher
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        Haptics.impact(.light)
+                        showSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("Settings")
+                }
+            }
+            .sheet(isPresented: $showSettings) {
+                SettingsView()
             }
             .task {
                 guard let service = appState.service else { return }
@@ -159,7 +172,46 @@ struct ControlCenterSheet: View {
         }
     }
 
-    // MARK: Connection + throughput (unchanged summary)
+    // MARK: Router switcher (the relocated hostname dropdown)
+
+    /// The old nav-bar hostname dropdown, now living in the Control Center's
+    /// top bar. A Menu when more than one router is saved; static otherwise.
+    @ViewBuilder
+    private var routerSwitcher: some View {
+        if appState.routers.count > 1 {
+            Menu {
+                ForEach(appState.routers) { router in
+                    Button {
+                        Haptics.selection()
+                        Task { await appState.switchRouter(id: router.id) }
+                    } label: {
+                        if router.id == appState.selectedRouterID {
+                            Label(router.displayName, systemImage: "checkmark")
+                        } else {
+                            Text(router.displayName)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(appState.hostname)
+                        .font(.headline)
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(theme.textSecondary)
+                }
+            }
+        } else {
+            Text(appState.hostname)
+                .font(.headline)
+                .foregroundStyle(theme.textPrimary)
+                .lineLimit(1)
+        }
+    }
+
+    // MARK: Connection + throughput
 
     private var connectionCard: some View {
         Card {
@@ -174,39 +226,6 @@ struct ControlCenterSheet: View {
                     Text(appState.selectedRouter?.ipAddress ?? (appState.isReviewerMode ? "Reviewer Mode" : ""))
                         .font(.subheadline)
                         .foregroundStyle(theme.textSecondary)
-                }
-                Spacer()
-            }
-        }
-    }
-
-    private var throughputCard: some View {
-        Card {
-            HStack(spacing: Spacing.lg) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Label("Download", systemImage: "arrow.down")
-                        .font(.statLabel)
-                        .foregroundStyle(theme.success)
-                    Text(
-                        ThroughputCalculator.formatRate(
-                            bytesPerSecond: appState.throughput.currentRx)
-                    )
-                    .font(.statValue)
-                    .foregroundStyle(theme.textPrimary)
-                    .contentTransition(.numericText())
-                }
-                Spacer()
-                VStack(alignment: .leading, spacing: 4) {
-                    Label("Upload", systemImage: "arrow.up")
-                        .font(.statLabel)
-                        .foregroundStyle(theme.info)
-                    Text(
-                        ThroughputCalculator.formatRate(
-                            bytesPerSecond: appState.throughput.currentTx)
-                    )
-                    .font(.statValue)
-                    .foregroundStyle(theme.textPrimary)
-                    .contentTransition(.numericText())
                 }
                 Spacer()
             }
@@ -444,5 +463,45 @@ struct ControlCenterSheet: View {
             .padding(.horizontal, Spacing.sm)
             .padding(.vertical, 3)
             .background(theme.separator.opacity(0.5), in: .capsule)
+    }
+}
+
+/// Download/upload readout, isolated so the 2s throughput tick only
+/// re-renders this row instead of the whole Control Center sheet.
+private struct ControlCenterThroughput: View {
+    @Environment(AppState.self) private var appState
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        Card {
+            HStack(spacing: Spacing.lg) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Download", systemImage: "arrow.down")
+                        .font(.statLabel)
+                        .foregroundStyle(theme.success)
+                    Text(
+                        ThroughputCalculator.formatRate(
+                            bytesPerSecond: appState.throughput.currentRx)
+                    )
+                    .font(.statValue)
+                    .foregroundStyle(theme.textPrimary)
+                    .contentTransition(.numericText())
+                }
+                Spacer()
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Upload", systemImage: "arrow.up")
+                        .font(.statLabel)
+                        .foregroundStyle(theme.info)
+                    Text(
+                        ThroughputCalculator.formatRate(
+                            bytesPerSecond: appState.throughput.currentTx)
+                    )
+                    .font(.statValue)
+                    .foregroundStyle(theme.textPrimary)
+                    .contentTransition(.numericText())
+                }
+                Spacer()
+            }
+        }
     }
 }

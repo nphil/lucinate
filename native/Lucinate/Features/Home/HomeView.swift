@@ -60,7 +60,9 @@ struct HomeView: View {
             }
         } else {
             deviceInfoCard
-            throughputCard
+            // Isolated in its own view so the 2s throughput tick only
+            // re-renders the hero, not the whole dashboard body.
+            ThroughputHeroCard(prefs: controller.prefs)
             vitalsCard
             let wireless = controller.visibleWireless
             if !wireless.isEmpty {
@@ -134,60 +136,6 @@ struct HomeView: View {
         if text.contains("RC") { return ("RC", theme.info) }
         if text.contains("TESTING") { return ("TESTING", theme.warning) }
         return ("STABLE", theme.success)
-    }
-
-    // MARK: - Throughput hero
-
-    @ViewBuilder
-    private var throughputCard: some View {
-        let prefs = controller.prefs
-        Card {
-            VStack(alignment: .leading, spacing: Spacing.sm) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Realtime Throughput")
-                        .font(.cardTitle)
-                        .foregroundStyle(theme.textPrimary)
-                    if !prefs.showAllThroughput,
-                        let primary = prefs.primaryThroughputInterface, !primary.isEmpty
-                    {
-                        Text(primary)
-                            .font(.caption)
-                            .foregroundStyle(theme.textSecondary)
-                    }
-                }
-                HStack(alignment: .top, spacing: Spacing.lg) {
-                    throughputStat(
-                        label: "Download",
-                        systemImage: "arrow.down",
-                        bytesPerSecond: appState.throughput.currentRx,
-                        color: theme.success
-                    )
-                    throughputStat(
-                        label: "Upload",
-                        systemImage: "arrow.up",
-                        bytesPerSecond: appState.throughput.currentTx,
-                        color: theme.info
-                    )
-                    Spacer(minLength: 0)
-                }
-                ThroughputChart(points: appState.throughput.history)
-            }
-        }
-    }
-
-    private func throughputStat(
-        label: String, systemImage: String, bytesPerSecond: Double, color: Color
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Label(label, systemImage: systemImage)
-                .font(.statLabel)
-                .foregroundStyle(color)
-            Text(ThroughputCalculator.formatRate(bytesPerSecond: bytesPerSecond))
-                .font(.statValue)
-                .foregroundStyle(theme.textPrimary)
-                .contentTransition(.numericText())
-                .animation(.default, value: bytesPerSecond)
-        }
     }
 
     // MARK: - System vitals
@@ -360,6 +308,60 @@ struct HomeView: View {
             .padding(.horizontal, Spacing.sm)
             .padding(.vertical, 3)
             .background(color.opacity(0.15), in: .capsule)
+    }
+}
+
+/// Realtime throughput hero (numbers + chart), isolated so the 2s polling
+/// tick only invalidates this view rather than the whole dashboard body —
+/// keeping scrolling smooth on ProMotion displays.
+private struct ThroughputHeroCard: View {
+    var prefs: DashboardPreferences
+
+    @Environment(AppState.self) private var appState
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Realtime Throughput")
+                        .font(.cardTitle)
+                        .foregroundStyle(theme.textPrimary)
+                    if !prefs.showAllThroughput,
+                        let primary = prefs.primaryThroughputInterface, !primary.isEmpty
+                    {
+                        Text(primary)
+                            .font(.caption)
+                            .foregroundStyle(theme.textSecondary)
+                    }
+                }
+                HStack(alignment: .top, spacing: Spacing.lg) {
+                    stat(
+                        label: "Download", systemImage: "arrow.down",
+                        bytesPerSecond: appState.throughput.currentRx, color: theme.success)
+                    stat(
+                        label: "Upload", systemImage: "arrow.up",
+                        bytesPerSecond: appState.throughput.currentTx, color: theme.info)
+                    Spacer(minLength: 0)
+                }
+                ThroughputChart(points: appState.throughput.history)
+            }
+        }
+    }
+
+    private func stat(
+        label: String, systemImage: String, bytesPerSecond: Double, color: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(label, systemImage: systemImage)
+                .font(.statLabel)
+                .foregroundStyle(color)
+            Text(ThroughputCalculator.formatRate(bytesPerSecond: bytesPerSecond))
+                .font(.statValue)
+                .foregroundStyle(theme.textPrimary)
+                .contentTransition(.numericText())
+                .animation(.default, value: bytesPerSecond)
+        }
     }
 }
 

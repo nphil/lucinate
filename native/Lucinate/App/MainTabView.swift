@@ -1,13 +1,13 @@
 import SwiftUI
 
 /// The 4-tab shell (Apple Music-style): Home, Network, TravelMate, Tailscale.
-/// A Liquid Glass tab bar with a persistent Connection accessory, and the
-/// hostname menu (router switcher + Settings) in every navigation bar.
+/// Tab roots run without a navigation bar so content sits flush against the
+/// top safe area; the router switcher, Settings, and Reboot all live in the
+/// Control Center sheet (opened from the persistent Connection accessory).
 struct MainTabView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
 
-    @State private var showSettings = false
     @State private var showControlCenter = false
     @State private var showRebootConfirm = false
 
@@ -35,9 +35,6 @@ struct MainTabView: View {
                     showControlCenter = true
                 }
         }
-        .sheet(isPresented: $showSettings) {
-            SettingsView()
-        }
         .sheet(isPresented: $showControlCenter) {
             ControlCenterSheet()
                 .presentationDetents([.medium, .large])
@@ -54,7 +51,6 @@ struct MainTabView: View {
             Text("The router will restart and the connection will be interrupted for a minute or two.")
         }
         .environment(\.requestReboot, RequestRebootAction { showRebootConfirm = true })
-        .environment(\.openSettings2, OpenSettingsAction { showSettings = true })
     }
 
     @ViewBuilder
@@ -62,14 +58,10 @@ struct MainTabView: View {
         NavigationStack {
             content()
                 .background(theme.background)
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        HostnameMenu(
-                            openSettings: { showSettings = true },
-                            requestReboot: { showRebootConfirm = true }
-                        )
-                    }
-                }
+                // No nav bar on the tab root: titles are removed and content
+                // begins at the top safe area. Pushed screens (Wi-Fi, Leases,
+                // …) still get their own bar + back button.
+                .toolbar(.hidden, for: .navigationBar)
         }
         .disabled(appState.isRebooting)
         .overlay {
@@ -80,14 +72,9 @@ struct MainTabView: View {
     }
 }
 
-/// Environment plumbing so any feature view can request the reboot flow or
-/// open Settings without threading closures through every level.
+/// Environment plumbing so the Control Center can request the reboot flow
+/// (handled by MainTabView's confirmation dialog).
 struct RequestRebootAction: Sendable {
-    let run: @MainActor () -> Void
-    @MainActor func callAsFunction() { run() }
-}
-
-struct OpenSettingsAction: Sendable {
     let run: @MainActor () -> Void
     @MainActor func callAsFunction() { run() }
 }
@@ -96,88 +83,10 @@ private struct RequestRebootKey: EnvironmentKey {
     static let defaultValue = RequestRebootAction(run: {})
 }
 
-private struct OpenSettingsKey: EnvironmentKey {
-    static let defaultValue = OpenSettingsAction(run: {})
-}
-
 extension EnvironmentValues {
     var requestReboot: RequestRebootAction {
         get { self[RequestRebootKey.self] }
         set { self[RequestRebootKey.self] = newValue }
-    }
-    var openSettings2: OpenSettingsAction {
-        get { self[OpenSettingsKey.self] }
-        set { self[OpenSettingsKey.self] = newValue }
-    }
-}
-
-/// The tappable hostname in the nav bar: router switcher + Settings + Manage
-/// Routers + About + Logout. Stays enabled during reboot lockout.
-struct HostnameMenu: View {
-    @Environment(AppState.self) private var appState
-    @Environment(\.theme) private var theme
-
-    var openSettings: () -> Void
-    var requestReboot: () -> Void
-
-    @State private var showLogoutConfirm = false
-
-    var body: some View {
-        Menu {
-            if appState.routers.count > 1 || appState.isReviewerMode {
-                Section("Switch Router") {
-                    ForEach(appState.routers) { router in
-                        Button {
-                            Task { await appState.switchRouter(id: router.id) }
-                        } label: {
-                            if router.id == appState.selectedRouterID {
-                                Label(router.displayName, systemImage: "checkmark")
-                            } else {
-                                Text(router.displayName)
-                            }
-                        }
-                    }
-                }
-            }
-            Section {
-                Button {
-                    openSettings()
-                } label: {
-                    Label("Settings", systemImage: "gearshape")
-                }
-                Button {
-                    requestReboot()
-                } label: {
-                    Label("Reboot Router", systemImage: "arrow.clockwise.circle")
-                }
-            }
-            Section {
-                Button(role: .destructive) {
-                    showLogoutConfirm = true
-                } label: {
-                    Label("Log Out", systemImage: "rectangle.portrait.and.arrow.right")
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Text(appState.hostname)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(theme.textSecondary)
-            }
-        }
-        .confirmationDialog(
-            "Log Out?", isPresented: $showLogoutConfirm, titleVisibility: .visible
-        ) {
-            Button("Log Out", role: .destructive) {
-                appState.logout()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This clears saved credentials and accepted certificates.")
-        }
     }
 }
 
