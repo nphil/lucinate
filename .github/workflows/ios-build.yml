@@ -4,13 +4,10 @@ name: Build iOS IPA (unsigned)
 # mirroring the Stashy pipeline: no Apple Developer account or signing secrets
 # needed. The IPA is uploaded as a workflow artifact and attached to a release.
 
+# Superseded by ios-native-release.yml (the native SwiftUI app is now the
+# shipping iOS app, released as 2.0.x under the same bundle id). Kept for
+# manual Flutter builds only — no longer auto-ships on push to main.
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**/*.md'
-      - 'android/**'
-      - 'fastlane/**'
   workflow_dispatch:
 
 permissions:

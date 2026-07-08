@@ -1,0 +1,168 @@
+name: iOS Native Release (unsigned)
+
+# Builds the NATIVE SwiftUI app as an UNSIGNED device .ipa for sideloading
+# (AltStore / Feather / Sideloadly), publishes a GitHub release, and patches
+# apps.json (the Feather source). This is the successor to the Flutter
+# ios-build.yml pipeline — the native app ships as 2.0.x under the same bundle
+# id (app.cogwheel.lucimobile), so Feather treats it as an in-place update.
+#
+# The build+package steps run on any ref (so the branch can validate the
+# never-before-attempted device archive via workflow_dispatch); the publish
+# and apps.json steps only run on main.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'native/**'
+      - '.github/workflows/ios-native-release.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  group: native-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build unsigned native IPA
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: xcodebuild -version
+
+      - name: Install tools
+        run: |
+          command -v xcodegen  >/dev/null 2>&1 || brew install xcodegen
+          command -v xcbeautify >/dev/null 2>&1 || brew install xcbeautify
+
+      - name: Compute version
+        id: ver
+        run: |
+          set -euo pipefail
+          # MAJOR.MINOR pinned at 2.0 for the native app; patch = run number so
+          # every build is a strictly-increasing semver Feather sees as an
+          # update (mirrors the Flutter pipeline's auto-bump rule).
+          VERSION="2.0.${{ github.run_number }}"
+          echo "version=$VERSION"                >> "$GITHUB_OUTPUT"
+          echo "build=${{ github.run_number }}"  >> "$GITHUB_OUTPUT"
+          echo "tag=ios-v$VERSION"               >> "$GITHUB_OUTPUT"
+          echo "Building Lucinate (native) v$VERSION"
+
+      - name: Generate project
+        working-directory: native
+        run: xcodegen generate
+
+      - name: Archive (unsigned, generic iOS device)
+        working-directory: native
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project Lucinate.xcodeproj \
+            -scheme Lucinate \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/Lucinate.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            MARKETING_VERSION=${{ steps.ver.outputs.version }} \
+            CURRENT_PROJECT_VERSION=${{ steps.ver.outputs.build }} \
+            COMPILER_INDEX_STORE_ENABLE=NO | xcbeautify --renderer github-actions
+
+      - name: Package into IPA
+        working-directory: native
+        run: |
+          set -euo pipefail
+          APP_PATH="build/Lucinate.xcarchive/Products/Applications/Lucinate.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "❌ Lucinate.app not found — archive failed."
+            find build -maxdepth 4 -name '*.app' 2>/dev/null || true
+            exit 1
+          fi
+          # Completeness gate: a failed link can leave a shell .app.
+          EXE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist" 2>/dev/null || echo Lucinate)
+          if [ ! -s "$APP_PATH/$EXE" ]; then
+            echo "❌ App executable '$EXE' missing/empty — build failed."
+            exit 1
+          fi
+          rm -rf Payload lucinate.ipa
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qry lucinate.ipa Payload
+          echo "IPA size: $(du -sh lucinate.ipa | cut -f1)"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lucinate-native-ipa
+          path: native/lucinate.ipa
+          if-no-files-found: error
+
+      - name: Publish release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: Lucinate v${{ steps.ver.outputs.version }} (native)
+          body: |
+            Native SwiftUI rewrite. Unsigned IPA — sideload with AltStore / Feather / Sideloadly.
+            Built from `${{ github.sha }}`.
+
+            Feather source: https://raw.githubusercontent.com/nphil/lucinate/main/apps.json
+          files: native/lucinate.ipa
+
+      # Patch apps.json in-job: releases created by GITHUB_TOKEN do NOT fire the
+      # `release: published` event, so a release-triggered workflow never runs.
+      - name: Update Feather repo (apps.json)
+        if: github.ref == 'refs/heads/main'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          BUILD:   ${{ steps.ver.outputs.build }}
+          TAG:     ${{ steps.ver.outputs.tag }}
+          SHA:     ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          SIZE=$(wc -c < native/lucinate.ipa | tr -d ' ')
+          DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          URL="https://github.com/nphil/lucinate/releases/download/${TAG}/lucinate.ipa"
+          NOTES="Native SwiftUI rewrite (2.0). Unsigned IPA — sideload with Feather/AltStore. Built from \`${SHA:0:7}\`."
+
+          git fetch origin main
+          git checkout -B main origin/main
+
+          VERSION="$VERSION" BUILD="$BUILD" DATE="$DATE" URL="$URL" SIZE="$SIZE" NOTES="$NOTES" \
+          python3 - << 'PYEOF'
+          import json, os
+          data = json.load(open('apps.json'))
+          app = data['apps'][0]
+          entry = {
+              "version": os.environ['VERSION'],
+              "buildVersion": os.environ['BUILD'],
+              "date": os.environ['DATE'],
+              "localizedDescription": os.environ['NOTES'],
+              "downloadURL": os.environ['URL'],
+              "size": int(os.environ['SIZE']),
+          }
+          app['versions'] = [v for v in app['versions'] if v['version'] != entry['version']]
+          app['versions'].insert(0, entry)
+          with open('apps.json', 'w') as f:
+              json.dump(data, f, indent=2)
+              f.write('\n')
+          print("apps.json patched for", entry['version'])
+          PYEOF
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add apps.json
+          git diff --cached --quiet && { echo "Nothing to commit"; exit 0; }
+          git commit -m "Update Feather repo for ${TAG} [skip ci]"
+          git push origin main
