@@ -44,6 +44,16 @@ struct NetworkView: View {
                     } label: {
                         Label("Static Leases", systemImage: "pin")
                     }
+                    NavigationLink {
+                        FirewallView()
+                    } label: {
+                        Label("Firewall", systemImage: "shield.lefthalf.filled")
+                    }
+                    NavigationLink {
+                        DiagnosticsView()
+                    } label: {
+                        Label("Diagnostics", systemImage: "stethoscope")
+                    }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
