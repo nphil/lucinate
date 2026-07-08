@@ -21,6 +21,14 @@
       ],
       "versions": [
         {
+          "version": "1.1.18",
+          "buildVersion": "18",
+          "date": "2026-07-08T02:19:13Z",
+          "localizedDescription": "Unsigned IPA \u2014 sideload with Feather/AltStore. Built from `1291d48`.",
+          "downloadURL": "https://github.com/nphil/lucinate/releases/download/ios-v1.1.18/lucinate.ipa",
+          "size": 7971291
+        },
+        {
           "version": "1.1.17",
           "buildVersion": "17",
           "date": "2026-07-08T02:10:38Z",
