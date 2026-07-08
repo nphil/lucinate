@@ -33,6 +33,22 @@ jobs:
       - name: Flutter version
         run: flutter --version
 
+      - name: Compute version
+        id: ver
+        run: |
+          set -euo pipefail
+          # Base MAJOR.MINOR from pubspec; patch = run number so every build
+          # produces a strictly-increasing semver that Feather treats as an
+          # update. (Mirrors Stashy's auto-bump-every-build rule.)
+          BASE=$(grep -m1 '^version:' pubspec.yaml | sed 's/version:[[:space:]]*//; s/+.*//')
+          MAJOR=$(echo "$BASE" | cut -d. -f1)
+          MINOR=$(echo "$BASE" | cut -d. -f2)
+          VERSION="${MAJOR}.${MINOR}.${{ github.run_number }}"
+          echo "version=$VERSION"          >> "$GITHUB_OUTPUT"
+          echo "build=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          echo "tag=ios-v$VERSION"          >> "$GITHUB_OUTPUT"
+          echo "Building Lucinate v$VERSION (build ${{ github.run_number }})"
+
       - name: Install dependencies
         run: flutter pub get
 
@@ -58,7 +74,10 @@ jobs:
           echo "Generated app icons:"; ls "$ICONSET" | grep -c '\.png$'
 
       - name: Build unsigned iOS app
-        run: flutter build ios --release --no-codesign
+        run: |
+          flutter build ios --release --no-codesign \
+            --build-name=${{ steps.ver.outputs.version }} \
+            --build-number=${{ steps.ver.outputs.build }}
 
       - name: Package into IPA
         run: |
@@ -90,9 +109,11 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ios-${{ github.run_number }}
-          name: iOS build ${{ github.run_number }}
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: Lucinate v${{ steps.ver.outputs.version }}
           body: |
             Unsigned IPA — sideload with AltStore / Feather / Sideloadly.
             Built from `${{ github.sha }}`.
+
+            Feather source: https://raw.githubusercontent.com/nphil/lucinate/main/apps.json
           files: lucinate.ipa

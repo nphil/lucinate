@@ -71,6 +71,18 @@ flutter run
 - Android: `flutter build apk`  
 - iOS: `flutter build ios`
 
+### Sideload on iOS (Feather / AltStore)
+
+Add this source in [Feather](https://github.com/khcrysalis/Feather) or AltStore to get
+unsigned builds and over-the-air updates:
+
+```
+https://raw.githubusercontent.com/nphil/lucinate/main/apps.json
+```
+
+Every push to `main` builds a fresh unsigned IPA, publishes a release, and updates the
+source automatically — so Feather shows an update whenever the app changes.
+
 ---
 
 ## Project Structure
