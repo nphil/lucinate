@@ -22,6 +22,10 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- Allow Core Animation to drive animations at the display's full refresh
+	     rate (120 Hz on ProMotion); without this key it caps at 60 fps. -->
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>NSAppTransportSecurity</key>
