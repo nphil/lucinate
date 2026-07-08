@@ -1,0 +1,63 @@
+name: iOS Native Build
+
+on:
+  push:
+    branches:
+      - "claude/native-swift-rewrite*"
+    paths:
+      - "native/**"
+      - ".github/workflows/ios-native-build.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          ls /Applications | grep -i xcode || true
+
+      - name: Install XcodeGen
+        run: |
+          command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
+          command -v xcbeautify >/dev/null 2>&1 || brew install xcbeautify
+
+      - name: Generate project
+        working-directory: native
+        run: xcodegen generate
+
+      - name: Build (iOS Simulator)
+        working-directory: native
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Lucinate.xcodeproj \
+            -scheme Lucinate \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO | xcbeautify --renderer github-actions
+
+      - name: Unit tests
+        working-directory: native
+        run: |
+          set -o pipefail
+          DEVICE=$(xcrun simctl list devices available | grep -oE 'iPhone [^(]+' | head -1 | xargs)
+          if [ -z "$DEVICE" ]; then
+            echo "No iPhone simulator available; skipping tests"
+            exit 0
+          fi
+          echo "Testing on simulator: $DEVICE"
+          xcodebuild test \
+            -project Lucinate.xcodeproj \
+            -scheme Lucinate \
+            -destination "platform=iOS Simulator,name=$DEVICE" \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO | xcbeautify --renderer github-actions

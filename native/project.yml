@@ -1,0 +1,43 @@
+name: Lucinate
+options:
+  bundleIdPrefix: app.cogwheel
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    MARKETING_VERSION: "2.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGNING_ALLOWED: "NO"
+    ENABLE_USER_SCRIPT_SANDBOXING: "YES"
+targets:
+  Lucinate:
+    type: application
+    platform: iOS
+    sources:
+      - Lucinate
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.cogwheel.lucimobile
+        INFOPLIST_FILE: Support/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1"
+  LucinateTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - LucinateTests
+    dependencies:
+      - target: Lucinate
+schemes:
+  Lucinate:
+    build:
+      targets:
+        Lucinate: all
+    test:
+      gatherCoverageData: false
+      targets:
+        - LucinateTests
