@@ -30,6 +30,12 @@ struct Router: Codable, Sendable, Identifiable, Equatable {
         "\(ipAddress)-\(username)"
     }
 
+    /// Best label for menus/lists: live hostname when known, else the address.
+    var displayName: String {
+        if let lastKnownHostname, !lastKnownHostname.isEmpty { return lastKnownHostname }
+        return ipAddress
+    }
+
     func copyWith(
         id: String? = nil,
         ipAddress: String? = nil,
