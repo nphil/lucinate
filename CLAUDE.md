@@ -27,12 +27,24 @@
 
 ## After pushing to main — ALWAYS verify the build
 
-- Every push to `main` triggers a real build + public release, so after
-  pushing, confirm the pipeline goes green and check for failed builds.
-- **Do this with a cheap Haiku subagent** (Agent tool, `model: haiku`,
-  run in background) to conserve tokens — keep the expensive main context out
-  of the polling loop.
-- The Haiku agent should: poll the `ios-build.yml` run to completion, confirm
-  the `ios-v<version>` release published with a `lucinate.ipa` asset, confirm
-  `apps.json` on `main` gained the new version entry, and — on any failure —
-  pull the failing job's logs and report the root cause tersely.
+Every push to `main` triggers a real build + public release, so after pushing,
+confirm the pipeline goes green and check for failed builds. Verify by
+checking (a) the `ios-v<version>` release published with a `lucinate.ipa`
+asset, and (b) `apps.json` on `main` gained the new version entry.
+
+Token-efficient method (learned the hard way):
+
+- The build takes several minutes. Wait for it, then do the checks — don't
+  poll tightly.
+- **Use SMALL-output calls:** `mcp__github__list_releases` (perPage 3) and
+  `mcp__github__get_file_contents` (apps.json). Do NOT call
+  `list_workflow_runs` — it dumps ~180k chars and overflows context.
+- A Haiku background subagent **cannot hold a multi-minute wait loop** (it
+  ends its turn early) and each dispatch costs ~25k tokens — often *more* than
+  a couple of direct small checks. So for the quick green/red verification,
+  prefer a single delayed direct check (e.g. schedule a reminder ~6 min out
+  via `send_later`, then run the two small calls above).
+- Reserve a Haiku subagent for **deeper failure triage** — digging job logs
+  (`list_workflow_jobs` + `get_job_logs` with `failed_only`/`tail_lines`)
+  when a build is actually broken, so that large log output stays out of the
+  main context.
