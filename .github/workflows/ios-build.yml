@@ -117,3 +117,52 @@ jobs:
 
             Feather source: https://raw.githubusercontent.com/nphil/lucinate/main/apps.json
           files: lucinate.ipa
+
+      # Patch apps.json here rather than relying on a release-triggered
+      # workflow: releases created by GITHUB_TOKEN do NOT fire the
+      # `release: published` event, so the update must happen in this job.
+      - name: Update Feather repo (apps.json)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          BUILD:   ${{ steps.ver.outputs.build }}
+          TAG:     ${{ steps.ver.outputs.tag }}
+          SHA:     ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          SIZE=$(wc -c < lucinate.ipa | tr -d ' ')
+          DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          URL="https://github.com/nphil/lucinate/releases/download/${TAG}/lucinate.ipa"
+          NOTES="Unsigned IPA — sideload with Feather/AltStore. Built from \`${SHA:0:7}\`."
+
+          # The build was checked out at the triggering commit; move onto the
+          # current tip of main before committing.
+          git fetch origin main
+          git checkout -B main origin/main
+
+          VERSION="$VERSION" BUILD="$BUILD" DATE="$DATE" URL="$URL" SIZE="$SIZE" NOTES="$NOTES" \
+          python3 - << 'PYEOF'
+          import json, os
+          data = json.load(open('apps.json'))
+          app = data['apps'][0]
+          entry = {
+              "version": os.environ['VERSION'],
+              "buildVersion": os.environ['BUILD'],
+              "date": os.environ['DATE'],
+              "localizedDescription": os.environ['NOTES'],
+              "downloadURL": os.environ['URL'],
+              "size": int(os.environ['SIZE']),
+          }
+          app['versions'] = [v for v in app['versions'] if v['version'] != entry['version']]
+          app['versions'].insert(0, entry)
+          with open('apps.json', 'w') as f:
+              json.dump(data, f, indent=2)
+              f.write('\n')
+          print("apps.json patched for", entry['version'])
+          PYEOF
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add apps.json
+          git diff --cached --quiet && { echo "Nothing to commit"; exit 0; }
+          git commit -m "Update Feather repo for ${TAG} [skip ci]"
+          git push origin main

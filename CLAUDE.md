@@ -15,10 +15,13 @@
   ship a build — do not gate releases behind manual tagging.
 - `.github/workflows/ios-build.yml` — on push to `main`: auto-bumps the
   version to `MAJOR.MINOR.<github.run_number>` (monotonically increasing, so
-  Feather always detects an update), builds the unsigned IPA, and publishes a
-  GitHub release tagged `ios-v<version>`.
-- `.github/workflows/ios-update-repo.yml` — on `release: published`: prepends
-  the new version to `apps.json` and commits it back with `[skip ci]`.
+  Feather always detects an update), builds the unsigned IPA, publishes a
+  GitHub release tagged `ios-v<version>`, and then **patches `apps.json`
+  in-job** (prepends the new version, commits back with `[skip ci]`).
+- **Do NOT rely on a `release: published`-triggered workflow to update
+  `apps.json`.** Releases created by the built-in `GITHUB_TOKEN` do not fire
+  workflow-triggering events, so such a workflow never runs. The build job
+  must own the `apps.json` update itself (this is how Stashy does it too).
 - iOS releases use the **`ios-v*`** tag namespace on purpose, to avoid
   triggering the Android `release.yml` (which fires on `v*`).
 
