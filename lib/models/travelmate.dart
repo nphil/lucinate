@@ -144,6 +144,7 @@ class WifiScanResult {
   /// uci `encryption` value to use when adding this as an uplink.
   final String encryption;
   final int band; // 2 or 5
+  final int channel; // radio channel the AP is on (for congestion analysis)
 
   const WifiScanResult({
     required this.ssid,
@@ -155,6 +156,7 @@ class WifiScanResult {
     required this.encrypted,
     required this.encryption,
     required this.band,
+    required this.channel,
   });
 
   int get qualityPercent =>
@@ -176,6 +178,7 @@ class WifiScanResult {
       encrypted: enc is Map && enc['enabled'] == true,
       encryption: _mapEncryption(enc),
       band: asInt(j['band']),
+      channel: asInt(j['channel']),
     );
   }
 
@@ -192,4 +195,28 @@ class WifiScanResult {
     if (wpa is List && wpa.contains(1)) return 'psk';
     return 'psk2';
   }
+}
+
+/// A radio as it relates to the router's own broadcast Wi-Fi (the AP your
+/// devices join). Backed by a `wifi-device` + its primary `mode=ap` iface.
+class BroadcastRadio {
+  final String device; // radio0/radio1
+  final int band; // 2/5/6
+  final String apSection; // wifi-iface uci section id for the main AP
+  final String ssid;
+  final bool apEnabled; // AP iface not `disabled`
+  final String channel; // 'auto' or a channel number
+  final bool uplinkLocked; // this radio is the active hotel uplink (STA)
+
+  const BroadcastRadio({
+    required this.device,
+    required this.band,
+    required this.apSection,
+    required this.ssid,
+    required this.apEnabled,
+    required this.channel,
+    required this.uplinkLocked,
+  });
+
+  String get bandLabel => bandLabelFor(band);
 }

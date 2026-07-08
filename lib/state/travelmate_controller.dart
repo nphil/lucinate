@@ -24,6 +24,7 @@ class TravelmateController extends ChangeNotifier {
   List<TravelmateUplink> _uplinks = const [];
   List<WifiScanResult> _scanResults = const [];
   Map<String, int> _radioBands = const {}; // radio0 -> 2, radio1 -> 5, ...
+  List<BroadcastRadio> _broadcast = const [];
   bool _loaded = false;
   bool _isLoading = false;
   bool _isBusy = false;
@@ -34,6 +35,7 @@ class TravelmateController extends ChangeNotifier {
   List<TravelmateUplink> get uplinks => _uplinks;
   List<WifiScanResult> get scanResults => _scanResults;
   Map<String, int> get radioBands => _radioBands;
+  List<BroadcastRadio> get broadcast => _broadcast;
   bool get loaded => _loaded;
   bool get isLoading => _isLoading;
   bool get isBusy => _isBusy;
@@ -130,6 +132,9 @@ class TravelmateController extends ChangeNotifier {
         rawData.toString(),
         enabled: enabled,
       );
+
+      // --- broadcast radios (the router's own AP that devices join) ---
+      _broadcast = _parseBroadcast(wlValues, _radioBands, _status.activeDevice);
 
       _loaded = true;
     } catch (e) {
@@ -272,6 +277,146 @@ class TravelmateController extends ChangeNotifier {
       _isBusy = false;
       notifyListeners();
     }
+  }
+
+  /// Build the broadcast-radio view from wireless config. The primary AP per
+  /// radio is the `mode=ap` iface (preferring `network=lan`).
+  List<BroadcastRadio> _parseBroadcast(
+    dynamic wlValues,
+    Map<String, int> bands,
+    String activeDevice,
+  ) {
+    if (wlValues is! Map) return const [];
+    final channels = <String, String>{};
+    final apByDevice = <String, Map<String, dynamic>>{};
+    final apSectionByDevice = <String, String>{};
+    final apIsLan = <String, bool>{};
+    wlValues.forEach((key, section) {
+      if (section is! Map) return;
+      final type = section['.type'];
+      if (type == 'wifi-device') {
+        channels[key.toString()] = (section['channel'] ?? 'auto').toString();
+      } else if (type == 'wifi-iface') {
+        if ((section['mode'] ?? '').toString() != 'ap') return;
+        final dev = (section['device'] ?? '').toString();
+        if (dev.isEmpty) return;
+        final isLan = (section['network'] ?? '').toString() == 'lan';
+        // Prefer the LAN AP; otherwise keep the first AP seen on this radio.
+        if (!apByDevice.containsKey(dev) || (isLan && apIsLan[dev] != true)) {
+          apByDevice[dev] = Map<String, dynamic>.from(section);
+          apSectionByDevice[dev] = key.toString();
+          apIsLan[dev] = isLan;
+        }
+      }
+    });
+    final devices = bands.keys.toList()
+      ..sort((a, b) => (bands[a] ?? 0).compareTo(bands[b] ?? 0));
+    final radios = <BroadcastRadio>[];
+    for (final dev in devices) {
+      final ap = apByDevice[dev];
+      if (ap == null) continue; // radio without an AP isn't a broadcast radio
+      radios.add(BroadcastRadio(
+        device: dev,
+        band: bands[dev] ?? 0,
+        apSection: apSectionByDevice[dev] ?? '',
+        ssid: (ap['ssid'] ?? '').toString(),
+        apEnabled: (ap['disabled'] ?? '0').toString() != '1',
+        channel: channels[dev] ?? 'auto',
+        uplinkLocked: activeDevice.isNotEmpty && dev == activeDevice,
+      ));
+    }
+    return radios;
+  }
+
+  Future<void> _wifiReload() async {
+    await _rpc('file', 'exec', {
+      'command': '/sbin/wifi',
+      'params': ['reload'],
+    });
+  }
+
+  /// Enable exactly the broadcast radios in [enabledDevices] (by device id).
+  /// Refuses to disable every radio, so the user can't lock themselves out.
+  Future<bool> setBroadcastBand(Set<String> enabledDevices) async {
+    if (enabledDevices.isEmpty) {
+      _error = 'At least one band must stay on.';
+      notifyListeners();
+      return false;
+    }
+    _isBusy = true;
+    _error = null;
+    notifyListeners();
+    try {
+      for (final r in _broadcast) {
+        if (r.apSection.isEmpty) continue;
+        await _rpc('uci', 'set', {
+          'config': 'wireless',
+          'section': r.apSection,
+          'values': {'disabled': enabledDevices.contains(r.device) ? '0' : '1'},
+        });
+      }
+      await _rpc('uci', 'commit', {'config': 'wireless'});
+      await _wifiReload();
+      await load();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    } finally {
+      _isBusy = false;
+      notifyListeners();
+    }
+  }
+
+  /// Set a radio's broadcast channel (`'auto'` or a number). No effect on a
+  /// radio locked to the hotel uplink — the UI blocks that case.
+  Future<bool> setChannel(String device, String channel) async {
+    _isBusy = true;
+    _error = null;
+    notifyListeners();
+    try {
+      await _rpc('uci', 'set', {
+        'config': 'wireless',
+        'section': device, // wifi-device sections are named radio0/radio1
+        'values': {'channel': channel},
+      });
+      await _rpc('uci', 'commit', {'config': 'wireless'});
+      await _wifiReload();
+      await load();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    } finally {
+      _isBusy = false;
+      notifyListeners();
+    }
+  }
+
+  /// Least-congested channels for a band, ranked best-first, from the last
+  /// scan. 2.4 GHz favors non-overlapping 1/6/11; 5 GHz favors empty channels.
+  /// Returns an empty list when there's no scan data to reason about.
+  List<int> suggestedChannels(int band) {
+    final counts = <int, int>{};
+    for (final r in _scanResults) {
+      if (r.band != band || r.channel <= 0) continue;
+      counts[r.channel] = (counts[r.channel] ?? 0) + 1;
+    }
+    if (counts.isEmpty) return const [];
+    if (band == 2) {
+      int overlap(int ch) {
+        var n = 0;
+        counts.forEach((c, k) {
+          if ((c - ch).abs() <= 2) n += k; // 2.4GHz channels overlap ±2
+        });
+        return n;
+      }
+      return [1, 6, 11]..sort((a, b) => overlap(a).compareTo(overlap(b)));
+    }
+    return [36, 40, 44, 48, 149, 153, 157, 161]
+      ..sort((a, b) => (counts[a] ?? 0).compareTo(counts[b] ?? 0));
   }
 
   int _nextUplinkIndex(Map<String, dynamic> wirelessValues) {

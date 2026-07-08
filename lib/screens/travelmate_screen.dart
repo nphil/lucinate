@@ -92,6 +92,10 @@ class _TravelmateScreenState extends ConsumerState<TravelmateScreen> {
           ),
           if (s.captive) _captiveBanner(context),
           _statusCard(context, s),
+          if (c.broadcast.isNotEmpty) ...[
+            const LuciSectionHeader('Broadcast'),
+            _broadcastCard(context, c),
+          ],
           const LuciSectionHeader('Saved networks'),
           if (c.uplinks.isEmpty)
             Padding(
@@ -283,6 +287,219 @@ class _TravelmateScreenState extends ConsumerState<TravelmateScreen> {
       padding: padding,
       child: child,
     );
+  }
+
+  // ---- Broadcast (the router's own AP your devices join) ----
+
+  Widget _broadcastCard(BuildContext context, TravelmateController c) {
+    final radios = c.broadcast;
+    if (radios.isEmpty) return const SizedBox.shrink();
+    final has24 = radios.any((r) => r.band == 2);
+    final has5 = radios.any((r) => r.band == 5);
+    final enabled = radios.where((r) => r.apEnabled);
+    final on24 = enabled.any((r) => r.band == 2);
+    final on5 = enabled.any((r) => r.band == 5);
+    final bandSel = (on24 && on5) ? 'both' : (on5 ? '5' : '2');
+    final ssid =
+        radios.map((r) => r.ssid).firstWhere((s) => s.isNotEmpty, orElse: () => '');
+
+    return _card(
+      context,
+      padding: const EdgeInsets.all(LuciSpacing.md),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Broadcast Wi-Fi', style: LuciTextStyles.cardTitle(context)),
+          const SizedBox(height: 2),
+          Text(
+            ssid.isEmpty
+                ? 'The Wi-Fi your devices join'
+                : 'The Wi-Fi your devices join • $ssid',
+            style: LuciTextStyles.cardSubtitle(context),
+          ),
+          if (has24 && has5) ...[
+            const SizedBox(height: LuciSpacing.md),
+            SizedBox(
+              width: double.infinity,
+              child: SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(value: '2', label: Text('2.4 GHz')),
+                  ButtonSegment(value: '5', label: Text('5 GHz')),
+                  ButtonSegment(value: 'both', label: Text('Both')),
+                ],
+                selected: {bandSel},
+                onSelectionChanged: c.isBusy
+                    ? null
+                    : (sel) => _applyBand(context, c, sel.first),
+              ),
+            ),
+          ],
+          const SizedBox(height: LuciSpacing.xs),
+          ...radios
+              .where((r) => r.apEnabled)
+              .map((r) => _channelTile(context, c, r)),
+        ],
+      ),
+    );
+  }
+
+  Widget _channelTile(
+      BuildContext context, TravelmateController c, BroadcastRadio r) {
+    final scheme = Theme.of(context).colorScheme;
+    final locked = r.uplinkLocked;
+    final chLabel = r.channel == 'auto' ? 'Auto' : 'Ch ${r.channel}';
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      dense: true,
+      leading: Icon(
+        Icons.wifi_rounded,
+        color: scheme.onSurfaceVariant,
+      ),
+      title: Text('${r.bandLabel} channel',
+          style: LuciTextStyles.cardSubtitle(context)),
+      subtitle: locked ? const Text('Locked to hotel uplink') : null,
+      trailing: locked
+          ? Icon(Icons.lock_outline_rounded,
+              size: 18, color: scheme.onSurfaceVariant)
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(chLabel, style: LuciTextStyles.detailValue(context)),
+                const Icon(Icons.chevron_right_rounded),
+              ],
+            ),
+      onTap: (locked || c.isBusy)
+          ? null
+          : () => _showChannelPicker(context, c, r),
+    );
+  }
+
+  Future<void> _applyBand(
+      BuildContext context, TravelmateController c, String sel) async {
+    final devices = <String>{};
+    for (final r in c.broadcast) {
+      final match = sel == 'both' ||
+          (sel == '2' && r.band == 2) ||
+          (sel == '5' && r.band == 5);
+      if (match) devices.add(r.device);
+    }
+    if (devices.isEmpty) return;
+    final ok = await _confirmBroadcastChange(context);
+    if (!ok || !context.mounted) return;
+    await _runAction(c.setBroadcastBand(devices), success: 'Broadcast updated');
+  }
+
+  Future<void> _showChannelPicker(
+      BuildContext context, TravelmateController c, BroadcastRadio r) async {
+    final chosen = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => Consumer(
+        builder: (ctx, ref, _) {
+          final ctrl = ref.watch(travelmateControllerProvider);
+          final suggestions = ctrl.suggestedChannels(r.band);
+          return SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                      LuciSpacing.md, LuciSpacing.sm, LuciSpacing.md, 0),
+                  child: Row(
+                    children: [
+                      Text('${r.bandLabel} channel',
+                          style: LuciTextStyles.cardTitle(ctx)),
+                      const Spacer(),
+                      if (ctrl.isScanning)
+                        const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      else
+                        TextButton.icon(
+                          onPressed: () => ctrl.scan(),
+                          icon: const Icon(Icons.radar_rounded, size: 18),
+                          label: const Text('Scan'),
+                        ),
+                    ],
+                  ),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.auto_awesome_rounded),
+                  title: const Text('Auto (recommended)'),
+                  subtitle: const Text('Router picks and adapts'),
+                  onTap: () => Navigator.of(ctx).pop('auto'),
+                ),
+                if (suggestions.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: LuciSpacing.md, vertical: LuciSpacing.sm),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Wrap(
+                        spacing: 8,
+                        runSpacing: 4,
+                        children: [
+                          for (var i = 0;
+                              i < suggestions.length && i < 6;
+                              i++)
+                            ActionChip(
+                              label: Text(
+                                  'Ch ${suggestions[i]}${i == 0 ? ' • best' : ''}'),
+                              onPressed: () =>
+                                  Navigator.of(ctx).pop('${suggestions[i]}'),
+                            ),
+                        ],
+                      ),
+                    ),
+                  )
+                else
+                  Padding(
+                    padding: const EdgeInsets.all(LuciSpacing.md),
+                    child: Text(
+                      'Tap Scan to find the least-congested channel.',
+                      style: LuciTextStyles.cardSubtitle(ctx),
+                    ),
+                  ),
+                const SizedBox(height: LuciSpacing.md),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+    if (chosen == null || !context.mounted) return;
+    final ok = await _confirmBroadcastChange(context);
+    if (!ok || !context.mounted) return;
+    await _runAction(
+      c.setChannel(r.device, chosen),
+      success: 'Channel set to ${chosen == 'auto' ? 'Auto' : chosen}',
+    );
+  }
+
+  Future<bool> _confirmBroadcastChange(BuildContext context) async {
+    final res = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Apply broadcast change?'),
+        content: const Text(
+          "Devices on this router's Wi-Fi will briefly disconnect — including "
+          "this phone if it's connected to it.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Apply'),
+          ),
+        ],
+      ),
+    );
+    return res ?? false;
   }
 
   // ---- Add flow ----
