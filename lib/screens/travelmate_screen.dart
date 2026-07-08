@@ -42,15 +42,8 @@ class _TravelmateScreenState extends ConsumerState<TravelmateScreen> {
     final c = ref.watch(travelmateControllerProvider);
     return Scaffold(
       appBar: LuciAppBar(
-        title: 'Travelmate',
+        title: 'TravelMate',
         showBack: true,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh_rounded),
-            tooltip: 'Refresh',
-            onPressed: c.isLoading ? null : () => c.load(),
-          ),
-        ],
       ),
       floatingActionButton: c.loaded
           ? FloatingActionButton.extended(
@@ -67,7 +60,7 @@ class _TravelmateScreenState extends ConsumerState<TravelmateScreen> {
     if (!c.loaded && c.isLoading) return const LuciLoadingWidget();
     if (!c.loaded && c.error != null) {
       return LuciErrorDisplay(
-        title: 'Couldn\'t reach Travelmate',
+        title: 'Couldn\'t reach TravelMate',
         message: c.error!,
         actionLabel: 'Retry',
         onAction: () => c.load(),
@@ -83,7 +76,7 @@ class _TravelmateScreenState extends ConsumerState<TravelmateScreen> {
           _card(
             context,
             child: SwitchListTile.adaptive(
-              title: Text('Travelmate', style: LuciTextStyles.cardTitle(context)),
+              title: Text('TravelMate', style: LuciTextStyles.cardTitle(context)),
               subtitle: Text(
                 'Repeat nearby Wi-Fi as this router\'s uplink',
                 style: LuciTextStyles.cardSubtitle(context),
@@ -93,7 +86,7 @@ class _TravelmateScreenState extends ConsumerState<TravelmateScreen> {
                   ? null
                   : (v) => _runAction(
                         c.setEnabled(v),
-                        success: v ? 'Travelmate enabled' : 'Travelmate disabled',
+                        success: v ? 'TravelMate enabled' : 'TravelMate disabled',
                       ),
             ),
           ),
@@ -207,27 +200,75 @@ class _TravelmateScreenState extends ConsumerState<TravelmateScreen> {
 
   Widget _uplinkTile(
       BuildContext context, TravelmateController c, TravelmateUplink u) {
+    final scheme = Theme.of(context).colorScheme;
     final active = c.status.activeSsid.isNotEmpty &&
         c.status.activeSsid == u.ssid;
-    return _card(
-      context,
-      child: ListTile(
-        leading: Icon(
-          active ? Icons.wifi_rounded : Icons.wifi_outlined,
-          color: active
-              ? Colors.green
-              : Theme.of(context).colorScheme.onSurfaceVariant,
+    return Dismissible(
+      key: ValueKey('uplink-${u.sectionId}'),
+      direction: DismissDirection.endToStart,
+      confirmDismiss: (_) => _confirmForget(context, u.ssid),
+      onDismissed: (_) => _runAction(
+        c.deleteUplink(u),
+        success: 'Forgot ${u.ssid}',
+      ),
+      background: Container(
+        margin: const EdgeInsets.symmetric(
+          horizontal: LuciSpacing.md,
+          vertical: LuciSpacing.xs,
         ),
-        title: Text(u.ssid, style: LuciTextStyles.cardTitle(context)),
-        subtitle: Text(
-          '${u.device}${u.enabled ? '' : ' • disabled'}',
-          style: LuciTextStyles.cardSubtitle(context),
+        decoration: BoxDecoration(
+          color: scheme.errorContainer,
+          borderRadius: LuciCardStyles.standardRadius,
         ),
-        trailing: active
-            ? const _Badge('Connected', Colors.green)
-            : null,
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.symmetric(horizontal: LuciSpacing.lg),
+        child: Icon(Icons.delete_outline_rounded,
+            color: scheme.onErrorContainer),
+      ),
+      child: _card(
+        context,
+        child: ListTile(
+          leading: Icon(
+            active ? Icons.wifi_rounded : Icons.wifi_outlined,
+            color: active ? Colors.green : scheme.onSurfaceVariant,
+          ),
+          title: Text(u.ssid, style: LuciTextStyles.cardTitle(context)),
+          subtitle: Text(
+            '${c.deviceLabel(u.device)}${u.enabled ? '' : ' • disabled'}',
+            style: LuciTextStyles.cardSubtitle(context),
+          ),
+          trailing: active
+              ? const _Badge('Connected', Colors.green)
+              : null,
+        ),
       ),
     );
+  }
+
+  Future<bool> _confirmForget(BuildContext context, String ssid) async {
+    final res = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Forget "$ssid"?'),
+        content: const Text(
+          'This removes the saved network from this router.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+            ),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Forget'),
+          ),
+        ],
+      ),
+    );
+    return res ?? false;
   }
 
   Widget _card(BuildContext context,
@@ -302,7 +343,7 @@ class _TravelmateScreenState extends ConsumerState<TravelmateScreen> {
                                         ),
                                         title: Text(r.ssid),
                                         subtitle: Text(
-                                          '${r.band}GHz • ${r.qualityPercent}%'
+                                          '${r.bandLabel} • ${r.qualityPercent}%'
                                           '${r.encrypted ? '' : ' • open'}',
                                         ),
                                         trailing: Text('${r.signal} dBm'),

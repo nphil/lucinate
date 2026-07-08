@@ -8,6 +8,20 @@ library;
 
 import 'dart:convert';
 
+/// Maps a numeric Wi-Fi band (2/5/6) to a human-friendly label.
+String bandLabelFor(int band) {
+  switch (band) {
+    case 2:
+      return '2.4 GHz';
+    case 5:
+      return '5 GHz';
+    case 6:
+      return '6 GHz';
+    default:
+      return band > 0 ? '$band GHz' : '';
+  }
+}
+
 class TravelmateStatus {
   /// From `travelmate.global.trm_enabled`.
   final bool enabled;
@@ -145,6 +159,9 @@ class WifiScanResult {
 
   int get qualityPercent =>
       qualityMax > 0 ? ((quality * 100) / qualityMax).round() : 0;
+
+  /// Human-friendly band, e.g. `2.4 GHz` / `5 GHz`.
+  String get bandLabel => bandLabelFor(band);
 
   factory WifiScanResult.fromIwinfo(Map<String, dynamic> j, String device) {
     int asInt(dynamic v) => v is num ? v.toInt() : 0;

@@ -334,7 +334,7 @@ class _MoreScreenState extends ConsumerState<MoreScreen> {
                   context,
                   icon: Icons.travel_explore_outlined,
                   iconColor: Theme.of(context).colorScheme.primary,
-                  title: 'Travelmate',
+                  title: 'TravelMate',
                   subtitle: 'Repeat hotel/other Wi-Fi as uplink',
                   onTap: () {
                     Navigator.of(context).push(
