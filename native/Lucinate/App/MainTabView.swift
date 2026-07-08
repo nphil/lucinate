@@ -12,17 +12,18 @@ struct MainTabView: View {
     @State private var showRebootConfirm = false
 
     var body: some View {
-        TabView {
-            Tab("Home", systemImage: "gauge") {
+        @Bindable var state = appState
+        TabView(selection: $state.selectedTab) {
+            Tab("Home", systemImage: "gauge", value: AppState.MainTab.home) {
                 featureStack { HomeView() }
             }
-            Tab("Network", systemImage: "network") {
+            Tab("Network", systemImage: "network", value: AppState.MainTab.network) {
                 featureStack { NetworkView() }
             }
-            Tab("TravelMate", systemImage: "airplane") {
+            Tab("TravelMate", systemImage: "airplane", value: AppState.MainTab.travelmate) {
                 featureStack { TravelMateView() }
             }
-            Tab("Tailscale", systemImage: "lock.shield") {
+            Tab("Tailscale", systemImage: "lock.shield", value: AppState.MainTab.tailscale) {
                 featureStack { TailscaleView() }
             }
         }

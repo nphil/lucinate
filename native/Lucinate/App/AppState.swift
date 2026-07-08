@@ -17,6 +17,37 @@ final class AppState {
     private(set) var phase: Phase = .splash
     private(set) var isReviewerMode = false
 
+    // MARK: Cross-tab navigation
+
+    enum MainTab: Hashable {
+        case home, network, travelmate, tailscale
+    }
+
+    enum NetworkSegment: String, CaseIterable {
+        case clients = "Clients"
+        case interfaces = "Interfaces"
+    }
+
+    var selectedTab: MainTab = .home
+    /// Set before switching to the Network tab to auto-scroll/expand an
+    /// interface card (consumed by NetworkView).
+    var networkScrollTarget: String?
+    var networkSegment: NetworkSegment = .clients
+
+    /// Jump to an interface in the Network tab (or its dedicated tab).
+    func openInterface(named name: String) {
+        let lower = name.lowercased()
+        if lower.contains("tailscale") {
+            selectedTab = .tailscale
+        } else if lower.contains("travel_wan") || lower == "travelmate" {
+            selectedTab = .travelmate
+        } else {
+            networkSegment = .interfaces
+            networkScrollTarget = name
+            selectedTab = .network
+        }
+    }
+
     // MARK: Routers
 
     private(set) var routers: [Router] = []

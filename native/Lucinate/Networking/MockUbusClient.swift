@@ -53,7 +53,7 @@ actor MockUbusClient: UbusCalling {
 
     /// In-memory uci store: config -> section name -> option -> value.
     /// uci set/add/delete mutate it so reviewer-mode edits appear to stick.
-    private var uciConfigs: [String: [String: [String: JSONValue]]] = Self.initialUciConfigs()
+    private var uciConfigs: [String: [String: [String: JSONValue]]] = MockUbusClient.initialUciConfigs()
     private var uciAnonymousCounter = 0x06_00_00
 
     /// Persisted tailscale settings; set_settings merges form_data into this.
