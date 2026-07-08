@@ -73,8 +73,8 @@ native/
     DesignSystem/            # Spacing, Typography, Card, GlassBackground, Haptics, StatusDot, reusable views
     Features/
       Home/                  # HomeView + view models + cards (vitals, throughput chart, quick controls)
-      Clients/               # ClientsView, ClientRow, ClientDetail
-      Network/               # NetworkView (interfaces + wifi + firewall + dhcp + portforwards)
+      Network/               # NetworkView hub: Clients | Interfaces segmented + wifi/firewall/dhcp/portforwards
+      Clients/               # ClientsView, ClientRow, ClientDetail (rendered inside the Network tab)
       TravelMate/            # TravelMateView + controller
       Tailscale/             # TailscaleView + controller
       Settings/              # SettingsView, ManageRouters, ThemePicker, DashboardPrefs, About
@@ -326,28 +326,33 @@ auto-relogin and toast "Router is back online, reconnecting…"; on timeout noti
 
 **Use the iOS 26 `TabView` with `Tab(...)` items** (automatic Liquid Glass tab bar). Model the
 information architecture on **Apple Music**: a small set of clear tabs, large navigation titles,
-a persistent bottom accessory (the "Now Playing" analog), a global search, and an account/settings
-button in the top-right.
+a persistent bottom accessory (the "Now Playing" analog), a global search, and the router/settings
+menu anchored on the **hostname** in the nav bar (not a separate gear button or tab).
 
-### 4.1 Tabs (5) — TravelMate & Tailscale are first-class
+### 4.1 Tabs (4) — TravelMate & Tailscale are first-class
 
 | Tab | System image | Contents |
 |---|---|---|
 | **Home** | `house` / `gauge` | Vitals, throughput hero chart, **Quick Controls** (radios, TravelMate, Tailscale exit node), release/version, at-a-glance status. |
-| **Clients** | `person.2` | DHCP + wireless clients, search, all-routers vs selected toggle, detail, **actions** (§6). |
-| **Network** | `network` | Interfaces (wired+wireless), Wi-Fi AP management, DHCP/static leases, port forwards, firewall toggles (§5–§6). |
+| **Network** | `network` | Hub: **Clients** + **Interfaces** (wired+wireless) as the two primary lists, plus Wi-Fi AP management, DHCP/static leases, port forwards, firewall toggles (§5–§6). |
 | **TravelMate** | `airplane` / `wifi.router` | Full TravelMate (uplinks, scan/add, forget, broadcast band/channel, status, captive). |
 | **Tailscale** | `lock.shield` | Full Tailscale (status, exit node, routes, DNS, peers). |
 
-- Add a **Search** experience via `.searchable` on Home/Clients/Network (global search over clients,
-  interfaces, settings). Optionally a dedicated `Tab(role: .search)` if it reads cleaner.
-- **Router switcher** = tap the large title / a toolbar menu (like Apple Music's library switcher):
-  lists saved routers with live hostname + active check; selecting switches router.
-- **Settings** = a top-right toolbar **account/gear button** opening a Settings sheet
-  (Manage Routers, Appearance/Themes, Dashboard customization, About, Logout). Do **not** make
-  Settings a tab — keep the five above.
-- **Reboot lockout:** while rebooting, disable Home/Clients/Network/TravelMate/Tailscale
-  interactions except the Settings sheet path; show the rebooting toast/state.
+**Clients lives inside the Network tab** (clients are on the network). Make Network a hub: a top
+segmented control **`Clients | Interfaces`** switches the two big lists, and secondary areas (Wi-Fi,
+DHCP leases, Port Forwards, Firewall) are reachable as rows/links or a `Menu` within Network. Keep
+Clients a full, standalone module (§5.3) — it's just surfaced under Network rather than its own tab.
+
+- **Search** via `.searchable` where it applies (Clients list, Interfaces list; a global search over
+  clients/interfaces/settings is a bonus).
+- **Hostname menu (router switcher + Settings)** — the current router's **hostname** shown in the
+  nav bar (e.g. "MiniBeast") is a tappable native **`Menu`** (chevron affordance). It contains:
+  - **Switch router** — the saved routers with live hostname + a check on the active one; selecting switches.
+  - **Settings** — opens the Settings sheet (Appearance/Themes, Customize Dashboard).
+  - **Manage Routers**, **About**, and **Logout** (destructive, confirmed).
+  Use a `Menu` (or `.contextMenu`-style popover) so it feels native — no top-right gear, no Settings tab.
+- **Reboot lockout:** while rebooting, disable Home/Network/TravelMate/Tailscale interactions except
+  the hostname-menu path (so the user can still reach Settings/Manage Routers); show the rebooting state.
 - `.tabBarMinimizeBehavior(.onScrollDown)` so the glass bar collapses on scroll (Apple Music feel).
 
 ### 4.2 The persistent **Connection Accessory** (the "Now Playing" analog)
@@ -384,7 +389,7 @@ destructive confirmations must be preserved. (Full behavioral detail is authorit
 - Interface status cards (UP/DOWN pill, proto-based icon) — tap: `tailscale`→Tailscale, `travel_wan`
   →TravelMate, else Network tab scrolled to it. Respect per-router visibility prefs (§5.7).
 
-### 5.3 Clients (parity)
+### 5.3 Clients (parity — surfaced inside the Network tab, §4.1)
 - All-routers vs Selected toggle (persisted, default **All**). Search across hostname/IP/MAC/vendor/dnsName.
 - Rows: presence dot, hostname, IP (+`+N` IPv6), vendor, connection-type chip (Wi-Fi/Wired/Unknown).
 - Expand → IP / IPv6 / MAC / Vendor / DNS Name / **Lease Time Remaining** (red if expired). IP/IPv6/MAC
@@ -676,12 +681,13 @@ Push after each phase; keep CI green. If CI breaks, fix before continuing (subag
   `Theme` struct + all 20 palettes + `ThemeManager` + swatch picker, DesignSystem primitives
   (Spacing, Typography, Card, `glassy`, Haptics, StatusDot). Unit tests for RPC unwrap, URL parse,
   throughput math, theme counts. **Push, green.**
-- **Phase 2 — App shell & navigation.** Splash → Login (+ reviewer mode) → 5-tab `TabView` with glass
-  bar, the **Connection Accessory**, router switcher, Settings sheet, global search scaffolding.
-  Wire `AppState`. **Push, green.**
-- **Phase 3 — Parity features.** Home (vitals + throughput chart + wireless/interface cards), Clients,
-  Network (interfaces + WG peers), TravelMate (full), Tailscale (full), Manage Routers, Themes,
-  Dashboard prefs, About, reboot flow. This is the **parity floor** — the app is now usable. **Push, green.**
+- **Phase 2 — App shell & navigation.** Splash → Login (+ reviewer mode) → 4-tab `TabView`
+  (Home/Network/TravelMate/Tailscale) with glass bar, the **Connection Accessory**, the **hostname
+  menu** (router switcher + Settings + Manage Routers + About + Logout), Settings sheet, search
+  scaffolding. Wire `AppState`. **Push, green.**
+- **Phase 3 — Parity features.** Home (vitals + throughput chart + wireless/interface cards), Network
+  hub (Clients + Interfaces segmented, WG peers), TravelMate (full), Tailscale (full), Manage Routers,
+  Themes, Dashboard prefs, About, reboot flow. This is the **parity floor** — the app is now usable. **Push, green.**
 - **Phase 4 — Tier A new features.** Control-Center quick toggles, Wi-Fi AP editing, DHCP static
   leases, client actions (reserve/WoL/block). **Push, green.**
 - **Phase 5 — Tier B (if time).** Port forwards, firewall toggles, log viewer, ping diagnostic. **Push, green.**
@@ -750,8 +756,8 @@ where you can hand a precise spec and get back a complete file with little back-
 
 - ✅ `claude/native-swift-rewrite` has a `native/` SwiftUI app that **builds green** in
   `ios-native-build.yml`.
-- ✅ Login → 5-tab app (Home/Clients/Network/TravelMate/Tailscale) with a Liquid Glass tab bar and the
-  persistent Connection accessory.
+- ✅ Login → 4-tab app (Home/Network/TravelMate/Tailscale) with a Liquid Glass tab bar, the persistent
+  Connection accessory, and the hostname menu (router switch + Settings). Clients lives under Network.
 - ✅ **Parity floor** met (§5): dashboard vitals + live throughput chart, clients, interfaces/WG,
   full TravelMate, full Tailscale, multi-router, reboot, reviewer mode.
 - ✅ **20 real-palette themes** (10 dark + 10 light) that reskin the app wholesale, with a live-preview picker.
