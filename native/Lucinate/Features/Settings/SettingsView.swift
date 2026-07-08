@@ -46,7 +46,7 @@ struct SettingsView: View {
 
                 Section("Dashboard") {
                     NavigationLink("Customize Dashboard") {
-                        DashboardPrefsPlaceholder()
+                        DashboardPrefsView()
                     }
                     .listRowBackground(theme.surface)
                 }
@@ -108,22 +108,6 @@ struct SettingsView: View {
         .onChange(of: themeManager.mode) { _, _ in
             Haptics.selection()
         }
-    }
-}
-
-/// Placeholder destination for the dashboard customization screen.
-/// A real screen will replace this view later — keep the type name stable.
-private struct DashboardPrefsPlaceholder: View {
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        Text("Coming soon")
-            .font(.body)
-            .foregroundStyle(theme.textSecondary)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(theme.background)
-            .navigationTitle("Customize Dashboard")
-            .navigationBarTitleDisplayMode(.inline)
     }
 }
 
