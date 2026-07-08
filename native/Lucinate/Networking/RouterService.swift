@@ -236,4 +236,128 @@ struct RouterService: Sendable {
         try await uciCommit(config: "wireless")
         try await wifiReload()
     }
+
+    // MARK: - Tier A: Wi-Fi AP editing
+
+    /// Applies option changes to any wireless section (wifi-iface or
+    /// wifi-device), commits, and reloads wifi.
+    func updateWireless(section: String, values: [String: String]) async throws {
+        try await uciSet(config: "wireless", section: section, values: values)
+        try await uciCommit(config: "wireless")
+        try await wifiReload()
+    }
+
+    // MARK: - Tier A: DHCP static leases
+
+    /// `uci get dhcp` values filtered to `host` sections (section name → options).
+    func staticLeases() async throws -> [(section: String, values: JSONValue)] {
+        let dhcp = try await uciGet(config: "dhcp")
+        var hosts: [(String, JSONValue)] = []
+        for (name, section) in dhcp.objectValue ?? [:] {
+            if section[".type"].stringValue == "host" {
+                hosts.append((name, section))
+            }
+        }
+        hosts.sort { $0.0 < $1.0 }
+        return hosts
+    }
+
+    private func restartDnsmasq() async throws {
+        _ = try await fileExec(command: "/etc/init.d/dnsmasq", params: ["restart"])
+    }
+
+    func addStaticLease(mac: String, ip: String, name: String?) async throws {
+        var values = ["mac": mac, "ip": ip]
+        if let name, !name.isEmpty { values["name"] = name }
+        try await uciAdd(config: "dhcp", type: "host", values: values)
+        try await uciCommit(config: "dhcp")
+        try await restartDnsmasq()
+    }
+
+    func updateStaticLease(section: String, mac: String, ip: String, name: String?) async throws {
+        var values = ["mac": mac, "ip": ip]
+        if let name, !name.isEmpty { values["name"] = name }
+        try await uciSet(config: "dhcp", section: section, values: values)
+        try await uciCommit(config: "dhcp")
+        try await restartDnsmasq()
+    }
+
+    func deleteStaticLease(section: String) async throws {
+        try await uciDelete(config: "dhcp", section: section)
+        try await uciCommit(config: "dhcp")
+        try await restartDnsmasq()
+    }
+
+    // MARK: - Tier A: client actions (WoL + firewall block)
+
+    /// True when a binary is present on the router (`which` exits 0 and
+    /// prints a path).
+    func isToolAvailable(_ tool: String) async -> Bool {
+        guard let result = try? await fileExec(command: "/bin/sh", params: ["-c", "which \(tool)"])
+        else { return false }
+        let stdout = result["stdout"].stringValue ?? ""
+        let code = result["code"].intValue ?? 1
+        return code == 0 && !stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func wakeOnLan(mac: String) async throws {
+        _ = try await systemExec("etherwake -b \(mac)")
+    }
+
+    private static let blockRulePrefix = "lucinate_block_"
+
+    /// MACs currently blocked by rules this app created (name-prefixed).
+    func blockedClientMACs() async throws -> Set<String> {
+        let firewall = try await uciGet(config: "firewall")
+        var macs: Set<String> = []
+        for (_, section) in firewall.objectValue ?? [:] {
+            guard section[".type"].stringValue == "rule",
+                (section["name"].stringValue ?? "").hasPrefix(Self.blockRulePrefix),
+                let mac = section["src_mac"].stringValue
+            else { continue }
+            macs.insert(mac.uppercased())
+        }
+        return macs
+    }
+
+    private func reloadFirewall() async throws {
+        _ = try await fileExec(command: "/etc/init.d/firewall", params: ["reload"])
+    }
+
+    /// Drops all forwarded traffic from a MAC (internet block).
+    func blockClient(mac: String) async throws {
+        let sanitized = mac.uppercased()
+        try await uciAdd(
+            config: "firewall", type: "rule",
+            values: [
+                "name": Self.blockRulePrefix + sanitized.replacingOccurrences(of: ":", with: ""),
+                "src": "lan",
+                "dest": "wan",
+                "src_mac": sanitized,
+                "proto": "all",
+                "target": "REJECT",
+                "enabled": "1",
+            ])
+        try await uciCommit(config: "firewall")
+        try await reloadFirewall()
+    }
+
+    func unblockClient(mac: String) async throws {
+        let firewall = try await uciGet(config: "firewall")
+        let target = mac.uppercased()
+        var sections: [String] = []
+        for (name, section) in firewall.objectValue ?? [:] {
+            guard section[".type"].stringValue == "rule",
+                (section["name"].stringValue ?? "").hasPrefix(Self.blockRulePrefix),
+                section["src_mac"].stringValue?.uppercased() == target
+            else { continue }
+            sections.append(name)
+        }
+        guard !sections.isEmpty else { return }
+        for section in sections {
+            try await uciDelete(config: "firewall", section: section)
+        }
+        try await uciCommit(config: "firewall")
+        try await reloadFirewall()
+    }
 }

@@ -31,6 +31,24 @@ struct NetworkView: View {
         }
         .background(theme.background)
         .navigationTitle("Network")
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Menu {
+                    NavigationLink {
+                        WifiSettingsView()
+                    } label: {
+                        Label("Wi-Fi Settings", systemImage: "wifi")
+                    }
+                    NavigationLink {
+                        StaticLeasesView()
+                    } label: {
+                        Label("Static Leases", systemImage: "pin")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+            }
+        }
         .searchable(text: $searchText, prompt: "Search by name, IP, MAC…")
         .onAppear { redirectToScrollTargetIfNeeded() }
         .onChange(of: appState.networkScrollTarget) { redirectToScrollTargetIfNeeded() }

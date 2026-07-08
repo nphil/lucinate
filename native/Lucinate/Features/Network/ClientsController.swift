@@ -16,6 +16,14 @@ final class ClientsController {
     private(set) var isLoading = false
     private(set) var error: String?
 
+    /// Uppercased MACs blocked by app-created firewall rules on the ACTIVE
+    /// router. Only populated in selected-router mode — in aggregate mode the
+    /// active service may not match a client's router, so actions are hidden.
+    private(set) var blockedMACs: Set<String> = []
+    /// True when `etherwake` exists on the active router (checked once per
+    /// load, selected-router mode only).
+    private(set) var wolAvailable = false
+
     private static let aggregateDefaultsKey = "clients_aggregate_all"
 
     init() {
@@ -54,6 +62,8 @@ final class ClientsController {
             }
             clients = ClientsController.dedupeAndSort(gathered)
             error = nil
+            blockedMACs = []
+            wolAvailable = false
         } else if let service {
             // SELECTED mode: the already-connected service only.
             do {
@@ -65,9 +75,24 @@ final class ClientsController {
                     self.error = error.localizedDescription
                 }
             }
+            blockedMACs = (try? await service.blockedClientMACs()) ?? []
+            wolAvailable = await service.isToolAvailable("etherwake")
         } else {
             clients = []
             error = nil
+            blockedMACs = []
+            wolAvailable = false
+        }
+    }
+
+    /// Local bookkeeping after a successful block/unblock, so the UI updates
+    /// without a full reload.
+    func markBlocked(mac: String, blocked: Bool) {
+        let key = mac.uppercased()
+        if blocked {
+            blockedMACs.insert(key)
+        } else {
+            blockedMACs.remove(key)
         }
     }
 

@@ -11,6 +11,9 @@ struct ClientsListView: View {
     var searchText: String
 
     @State private var expandedIDs: Set<String> = []
+    @State private var reserveClient: Client?
+    @State private var blockCandidate: Client?
+    @State private var showBlockConfirm = false
 
     var body: some View {
         let filtered = controller.filtered(query: searchText)
@@ -37,7 +40,14 @@ struct ClientsListView: View {
                             ClientCard(
                                 client: client,
                                 isExpanded: expandedIDs.contains(client.id),
-                                onToggle: { toggle(client.id) }
+                                isBlocked: controller.blockedMACs.contains(
+                                    client.macAddress.uppercased()),
+                                canAct: canAct(on: client),
+                                wolAvailable: controller.wolAvailable,
+                                onToggle: { toggle(client.id) },
+                                onReserve: { reserveClient = client },
+                                onWake: { wake(client) },
+                                onBlockToggle: { toggleBlock(client) }
                             )
                         }
                     }
@@ -55,6 +65,29 @@ struct ClientsListView: View {
         .task(id: appState.selectedRouterID) {
             await reload()
         }
+        .sheet(item: $reserveClient) { client in
+            NavigationStack {
+                StaticLeasesView(
+                    prefillMAC: client.macAddress,
+                    prefillIP: client.ipAddress == "N/A" ? nil : client.ipAddress,
+                    prefillName: client.hostname == "Unknown" ? nil : client.hostname
+                )
+            }
+        }
+        .confirmationDialog(
+            "Block \(blockCandidate?.hostname ?? "Client")?",
+            isPresented: $showBlockConfirm,
+            titleVisibility: .visible,
+            presenting: blockCandidate
+        ) { client in
+            Button("Block Internet", role: .destructive) {
+                Haptics.warning()
+                block(client)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("This device will lose internet access (LAN still works).")
+        }
     }
 
     private func reload() async {
@@ -68,6 +101,68 @@ struct ClientsListView: View {
                 expandedIDs.remove(id)
             } else {
                 expandedIDs.insert(id)
+            }
+        }
+    }
+
+    // MARK: - Client quick actions (selected-router mode only)
+
+    /// In aggregate mode the actions would hit the ACTIVE router, which may
+    /// not be the one the client belongs to — hide them there.
+    private func canAct(on client: Client) -> Bool {
+        !controller.aggregateAll && appState.service != nil && client.macAddress != "N/A"
+    }
+
+    private func wake(_ client: Client) {
+        guard let service = appState.service else { return }
+        Task {
+            do {
+                try await service.wakeOnLan(mac: client.macAddress)
+                Haptics.success()
+                appState.showToast("Magic packet sent to \(client.hostname)")
+            } catch {
+                Haptics.warning()
+                appState.showToast(error.localizedDescription)
+            }
+        }
+    }
+
+    private func toggleBlock(_ client: Client) {
+        if controller.blockedMACs.contains(client.macAddress.uppercased()) {
+            unblock(client)
+        } else {
+            // Destructive-ish: confirm before cutting the device off.
+            blockCandidate = client
+            showBlockConfirm = true
+        }
+    }
+
+    private func block(_ client: Client) {
+        guard let service = appState.service else { return }
+        Task {
+            do {
+                try await service.blockClient(mac: client.macAddress)
+                controller.markBlocked(mac: client.macAddress, blocked: true)
+                Haptics.success()
+                appState.showToast("\(client.hostname) blocked")
+            } catch {
+                Haptics.warning()
+                appState.showToast(error.localizedDescription)
+            }
+        }
+    }
+
+    private func unblock(_ client: Client) {
+        guard let service = appState.service else { return }
+        Task {
+            do {
+                try await service.unblockClient(mac: client.macAddress)
+                controller.markBlocked(mac: client.macAddress, blocked: false)
+                Haptics.success()
+                appState.showToast("\(client.hostname) unblocked")
+            } catch {
+                Haptics.warning()
+                appState.showToast(error.localizedDescription)
             }
         }
     }
@@ -131,7 +226,14 @@ private struct ClientCard: View {
 
     let client: Client
     let isExpanded: Bool
+    let isBlocked: Bool
+    /// False in aggregate (All Routers) mode — quick actions are hidden there.
+    let canAct: Bool
+    let wolAvailable: Bool
     let onToggle: () -> Void
+    let onReserve: () -> Void
+    let onWake: () -> Void
+    let onBlockToggle: () -> Void
 
     var body: some View {
         Card {
@@ -147,6 +249,34 @@ private struct ClientCard: View {
             }
         }
         .contextMenu {
+            if canAct {
+                Button {
+                    onReserve()
+                } label: {
+                    Label("Reserve IP", systemImage: "pin")
+                }
+                if wolAvailable {
+                    Button {
+                        onWake()
+                    } label: {
+                        Label("Wake on LAN", systemImage: "power")
+                    }
+                }
+                if isBlocked {
+                    Button {
+                        onBlockToggle()
+                    } label: {
+                        Label("Unblock Internet", systemImage: "checkmark.circle")
+                    }
+                } else {
+                    Button(role: .destructive) {
+                        onBlockToggle()
+                    } label: {
+                        Label("Block Internet", systemImage: "nosign")
+                    }
+                }
+                Divider()
+            }
             Button {
                 copy(client.ipAddress)
             } label: {
@@ -206,6 +336,9 @@ private struct ClientCard: View {
                 }
             }
             Spacer(minLength: Spacing.sm)
+            if isBlocked {
+                blockedChip
+            }
             connectionChip
             Image(systemName: "chevron.down")
                 .font(.caption.weight(.semibold))
@@ -255,6 +388,15 @@ private struct ClientCard: View {
             .background(background, in: .capsule)
     }
 
+    private var blockedChip: some View {
+        Text("Blocked")
+            .font(.caption.weight(.medium))
+            .foregroundStyle(theme.error)
+            .padding(.horizontal, Spacing.sm)
+            .padding(.vertical, Spacing.xs)
+            .background(theme.error.opacity(0.15), in: .capsule)
+    }
+
     // MARK: Expanded details
 
     private var details: some View {
@@ -280,7 +422,49 @@ private struct ClientCard: View {
                 value: client.formattedLeaseTime,
                 valueColor: client.isLeaseExpired ? theme.error : nil
             )
+            if canAct {
+                Divider()
+                    .padding(.vertical, Spacing.xs)
+                actionRow
+            }
         }
+    }
+
+    // MARK: Quick action row
+
+    private var actionRow: some View {
+        HStack(spacing: Spacing.sm) {
+            actionChip("Reserve IP", systemImage: "pin", tint: theme.accent, action: onReserve)
+            if wolAvailable {
+                actionChip("Wake", systemImage: "power", tint: theme.accent2, action: onWake)
+            }
+            if isBlocked {
+                actionChip(
+                    "Unblock", systemImage: "checkmark.circle", tint: theme.success,
+                    action: onBlockToggle)
+            } else {
+                actionChip("Block", systemImage: "nosign", tint: theme.error, action: onBlockToggle)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.top, Spacing.xs)
+    }
+
+    private func actionChip(
+        _ title: String, systemImage: String, tint: Color, action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            Haptics.impact(.light)
+            action()
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(tint)
+                .padding(.horizontal, Spacing.sm)
+                .padding(.vertical, Spacing.xs + 2)
+                .background(tint.opacity(0.15), in: .capsule)
+        }
+        .buttonStyle(.plain)
     }
 }
 
