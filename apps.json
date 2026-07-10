@@ -21,6 +21,14 @@
       ],
       "versions": [
         {
+          "version": "2.0.7",
+          "buildVersion": "7",
+          "date": "2026-07-10T10:39:29Z",
+          "localizedDescription": "Native SwiftUI rewrite (2.0). Unsigned IPA \u2014 sideload with Feather/AltStore. Built from `71e84b4`.",
+          "downloadURL": "https://github.com/nphil/lucinate/releases/download/ios-v2.0.7/lucinate.ipa",
+          "size": 1446616
+        },
+        {
           "version": "2.0.6",
           "buildVersion": "6",
           "date": "2026-07-10T07:04:48Z",
