@@ -42,6 +42,10 @@ struct LoginView: View {
             VStack(spacing: Spacing.xl) {
                 header
 
+                if appState.isAutoConnecting {
+                    connectingBanner
+                }
+
                 fieldsCard
 
                 VStack(spacing: Spacing.md) {
@@ -61,6 +65,16 @@ struct LoginView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .background(theme.background.ignoresSafeArea())
+        .animation(.snappy, value: appState.isAutoConnecting)
+        .onAppear {
+            // Pre-fill saved credentials so a manual retry is one tap when the
+            // background auto-connect couldn't reach the router.
+            if address.isEmpty, let saved = appState.savedLoginPrefill {
+                address = saved.address
+                username = saved.username
+                password = saved.password
+            }
+        }
         .onChange(of: appState.loginError) { _, newValue in
             if newValue != nil {
                 Haptics.error()
@@ -138,6 +152,39 @@ struct LoginView: View {
                 isHoldingBrand = pressing
             }
         }
+    }
+
+    // MARK: - Auto-connect banner
+
+    /// Shown while the silent reconnect from saved credentials runs. The form
+    /// below stays usable, and reviewer mode is always a long-press away.
+    private var connectingBanner: some View {
+        HStack(spacing: Spacing.sm) {
+            ProgressView()
+                .controlSize(.small)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Connecting to \(appState.autoConnectTarget ?? "your router")…")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(theme.textPrimary)
+                Text("Or sign in below / hold the logo for reviewer mode.")
+                    .font(.caption)
+                    .foregroundStyle(theme.textSecondary)
+            }
+            Spacer(minLength: Spacing.sm)
+            Button("Cancel") {
+                appState.cancelAutoConnect()
+            }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(theme.accent)
+            .buttonStyle(.plain)
+        }
+        .padding(Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            theme.surface,
+            in: .rect(cornerRadius: CornerRadius.small, style: .continuous)
+        )
+        .transition(.opacity)
     }
 
     // MARK: - Fields
