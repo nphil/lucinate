@@ -68,31 +68,51 @@ struct AddUplinkSheet: View {
 
     @ViewBuilder
     private var content: some View {
-        if controller.scanResults.isEmpty {
+        VStack(spacing: 0) {
+            // Live scan progress: a running count + an indeterminate bar, so
+            // the user sees activity and networks appear as they're found
+            // (per radio) rather than all at once after an opaque spinner.
             if controller.isScanning {
-                VStack(spacing: Spacing.md) {
+                VStack(spacing: Spacing.xs) {
+                    HStack(spacing: Spacing.sm) {
+                        ProgressView().controlSize(.small)
+                        Text("Scanning… \(controller.scanResults.count) found")
+                            .font(.subheadline)
+                            .foregroundStyle(theme.textSecondary)
+                        Spacer()
+                    }
                     ProgressView()
-                        .controlSize(.large)
-                    Text("Scanning for networks…")
+                        .progressViewStyle(.linear)
+                        .tint(theme.accent)
+                }
+                .padding(.horizontal, Spacing.md)
+                .padding(.vertical, Spacing.sm)
+            }
+
+            if controller.scanResults.isEmpty {
+                if controller.isScanning {
+                    Spacer()
+                    Text("Looking for nearby networks…")
                         .font(.subheadline)
                         .foregroundStyle(theme.textSecondary)
+                    Spacer()
+                } else {
+                    EmptyStateView(
+                        systemImage: "wifi.slash",
+                        title: "No networks found",
+                        message: "Tap rescan to scan again."
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                EmptyStateView(
-                    systemImage: "wifi.slash",
-                    title: "No networks found",
-                    message: "Tap rescan to scan again."
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                List(controller.scanResults) { result in
+                    networkRow(result)
+                        .listRowBackground(theme.surface)
+                }
+                .listStyle(.insetGrouped)
+                .scrollContentBackground(.hidden)
+                .animation(.snappy, value: controller.scanResults)
             }
-        } else {
-            List(controller.scanResults) { result in
-                networkRow(result)
-                    .listRowBackground(theme.surface)
-            }
-            .listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
         }
     }
 

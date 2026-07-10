@@ -10,6 +10,7 @@ struct TravelMateView: View {
     @State private var controller = TravelmateController()
     @State private var showAddSheet = false
     @State private var channelPickerRadio: BroadcastRadio?
+    @State private var editingRadio: BroadcastRadio?
     @State private var uplinkToForget: TravelmateUplink?
     @State private var pendingBandDevices: Set<String>?
 
@@ -30,6 +31,9 @@ struct TravelMateView: View {
             }
             .sheet(item: $channelPickerRadio) { radio in
                 ChannelPickerSheet(controller: controller, radio: radio)
+            }
+            .sheet(item: $editingRadio) { radio in
+                EditBroadcastNameSheet(controller: controller, radio: radio)
             }
             .alert(
                 "Forget Network?",
@@ -211,32 +215,79 @@ struct TravelMateView: View {
 
     private var broadcastCard: some View {
         let radios = controller.broadcast
+        let enabledRadios = radios.filter(\.apEnabled)
         let has24 = radios.contains { $0.band == 2 }
         let has5 = radios.contains { $0.band == 5 }
-        let broadcastSsid = radios.map(\.ssid).first { !$0.isEmpty } ?? ""
         return Card {
             VStack(alignment: .leading, spacing: Spacing.sm) {
                 Text("Broadcast Wi-Fi")
                     .font(.cardTitle)
                     .foregroundStyle(theme.textPrimary)
-                Text(
-                    broadcastSsid.isEmpty
-                        ? "The Wi-Fi your devices join"
-                        : "The Wi-Fi your devices join • \(broadcastSsid)"
-                )
-                .font(.subheadline)
-                .foregroundStyle(theme.textSecondary)
+                Text("The Wi-Fi your devices join")
+                    .font(.subheadline)
+                    .foregroundStyle(theme.textSecondary)
 
                 if has24 && has5 {
                     bandSelector
                         .padding(.top, Spacing.xs)
                 }
 
-                ForEach(radios.filter(\.apEnabled)) { radio in
-                    channelTile(radio)
+                ForEach(Array(enabledRadios.enumerated()), id: \.element.id) { index, radio in
+                    broadcastRadioBlock(radio)
+                    if index < enabledRadios.count - 1 {
+                        Divider().overlay(theme.separator)
+                    }
+                }
+
+                if !enabledRadios.isEmpty {
+                    Text(
+                        "Same name on both bands enables automatic band steering. "
+                            + "Use different names to force a device onto 2.4 or 5 GHz."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(theme.textSecondary)
+                    .padding(.top, Spacing.xs)
                 }
             }
         }
+    }
+
+    /// One broadcast radio: its band, an editable network name, and the
+    /// channel control.
+    private func broadcastRadioBlock(_ radio: BroadcastRadio) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            Text(radio.bandLabel)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(theme.textPrimary)
+
+            Button {
+                editingRadio = radio
+            } label: {
+                HStack(spacing: Spacing.sm) {
+                    Image(systemName: "pencil")
+                        .foregroundStyle(theme.textSecondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Network name")
+                            .font(.caption)
+                            .foregroundStyle(theme.textSecondary)
+                        Text(radio.ssid.isEmpty ? "Unnamed" : radio.ssid)
+                            .font(.subheadline)
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(theme.textSecondary)
+                }
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .disabled(controller.isBusy)
+
+            channelTile(radio)
+        }
+        .padding(.vertical, Spacing.xs)
     }
 
     private var bandSelector: some View {
@@ -285,7 +336,7 @@ struct TravelMateView: View {
                 Image(systemName: "wifi")
                     .foregroundStyle(theme.textSecondary)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(radio.bandLabel) channel")
+                    Text("Channel")
                         .font(.subheadline)
                         .foregroundStyle(theme.textPrimary)
                     if radio.uplinkLocked {
@@ -359,6 +410,15 @@ struct TravelMateView: View {
                 message: "No saved uplinks yet. Tap \"+\" to join one."
             )
         } else {
+            if !controller.duplicateUplinkIds.isEmpty {
+                Text(
+                    "Duplicate saved networks detected — swipe one left "
+                        + "(or long-press) to forget the redundant copy."
+                )
+                .font(.caption)
+                .foregroundStyle(theme.textSecondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
             ForEach(controller.uplinks) { uplink in
                 uplinkRow(uplink)
             }
@@ -366,7 +426,12 @@ struct TravelMateView: View {
     }
 
     private func uplinkRow(_ uplink: TravelmateUplink) -> some View {
-        let active = uplink.isActive(given: controller.status)
+        // Only the genuinely-connected uplink is "Active" — when several saved
+        // uplinks share an SSID (every hotel AP has the same name), the
+        // controller disambiguates by the connected radio so we don't badge
+        // all of them.
+        let active = uplink.sectionId == controller.activeUplinkId
+        let isDuplicate = controller.duplicateUplinkIds.contains(uplink.sectionId)
         return Card {
             HStack(spacing: Spacing.sm) {
                 Image(systemName: active ? "wifi" : "wifi.slash")
@@ -382,6 +447,9 @@ struct TravelMateView: View {
                     }
                 }
                 bandChip(controller.deviceLabel(uplink.device))
+                if isDuplicate {
+                    badge("Duplicate", color: theme.warning)
+                }
                 Spacer()
                 if active {
                     badge("Active", color: theme.success)
@@ -478,6 +546,72 @@ struct TravelMateView: View {
             } else {
                 Haptics.warning()
                 appState.showToast(controller.error ?? "Action failed")
+            }
+        }
+    }
+}
+
+/// Rename a broadcast radio's AP (the SSID your devices join). Editing 2.4 and
+/// 5 GHz independently lets the user share a name (band steering) or split them.
+private struct EditBroadcastNameSheet: View {
+    @Environment(AppState.self) private var appState
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+
+    let controller: TravelmateController
+    let radio: BroadcastRadio
+
+    @State private var name = ""
+    @State private var saving = false
+
+    private var trimmed: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Network name", text: $name)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                } header: {
+                    Text("\(radio.bandLabel) network name")
+                } footer: {
+                    Text("Devices on this band briefly disconnect when the name changes.")
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(theme.background)
+            .navigationTitle("Rename")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Save") { save() }
+                        .disabled(trimmed.isEmpty || trimmed == radio.ssid || saving)
+                }
+            }
+        }
+        .onAppear { name = radio.ssid }
+    }
+
+    private func save() {
+        guard let service = appState.service else { return }
+        saving = true
+        Task {
+            let ok = await controller.setBroadcastName(
+                section: radio.apSection, ssid: trimmed, service: service)
+            saving = false
+            if ok {
+                Haptics.success()
+                appState.showToast("Wi-Fi name updated")
+                dismiss()
+            } else {
+                Haptics.error()
+                appState.showToast(controller.error ?? "Couldn't rename network")
             }
         }
     }
