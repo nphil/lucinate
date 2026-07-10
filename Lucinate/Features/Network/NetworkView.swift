@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// Network hub: a segmented Clients | Interfaces switcher with a shared search
-/// field, plus a "more" menu for the secondary tools (Wi-Fi, Static Leases,
-/// Firewall, Diagnostics). Controls live in-content — flush against the top
-/// safe area, no navigation bar.
+/// Network hub: the selected list (Clients | Interfaces) fills the whole
+/// screen edge-to-edge, with a floating Liquid Glass segment switcher
+/// overlaid at the top — content scrolls visibly underneath it. Search lives
+/// inside each list's scrolling content (immersive, Messages-style).
 struct NetworkView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
@@ -13,66 +13,56 @@ struct NetworkView: View {
     @State private var interfacesController = InterfacesController()
 
     var body: some View {
-        @Bindable var state = appState
-        VStack(spacing: 0) {
-            VStack(spacing: Spacing.sm) {
-                HStack(spacing: Spacing.sm) {
-                    Picker("Section", selection: $state.networkSegment) {
-                        ForEach(AppState.NetworkSegment.allCases, id: \.self) { segment in
-                            Text(segment.rawValue).tag(segment)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-
-                    Menu {
-                        NavigationLink {
-                            WifiSettingsView()
-                        } label: {
-                            Label("Wi-Fi Settings", systemImage: "wifi")
-                        }
-                        NavigationLink {
-                            StaticLeasesView()
-                        } label: {
-                            Label("Static Leases", systemImage: "pin")
-                        }
-                        NavigationLink {
-                            FirewallView()
-                        } label: {
-                            Label("Firewall", systemImage: "shield.lefthalf.filled")
-                        }
-                        NavigationLink {
-                            DiagnosticsView()
-                        } label: {
-                            Label("Diagnostics", systemImage: "stethoscope")
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .font(.title3)
-                            .foregroundStyle(theme.accent)
-                            .frame(width: 32, height: 32)
-                    }
-                }
-
-                SearchField(text: $searchText, prompt: "Search by name, IP, MAC…")
-            }
-            .padding(.horizontal, Spacing.md)
-            .padding(.top, Spacing.sm)
-            .padding(.bottom, Spacing.xs)
-
+        Group {
             switch appState.networkSegment {
             case .clients:
-                ClientsListView(controller: clientsController, searchText: searchText)
+                ClientsListView(controller: clientsController, searchText: $searchText)
             case .interfaces:
-                InterfacesListView(controller: interfacesController, searchText: searchText)
+                InterfacesListView(controller: interfacesController, searchText: $searchText)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.background)
+        .overlay(alignment: .top) { segmentSwitcher }
         .onAppear { redirectToScrollTargetIfNeeded() }
         .onChange(of: appState.networkScrollTarget) { redirectToScrollTargetIfNeeded() }
         .onChange(of: appState.networkSegment) {
             Haptics.selection()
         }
+    }
+
+    // MARK: - Floating glass segment switcher
+
+    private var segmentSwitcher: some View {
+        HStack(spacing: Spacing.xs) {
+            ForEach(AppState.NetworkSegment.allCases, id: \.self) { segment in
+                segmentButton(segment)
+            }
+        }
+        .padding(4)
+        .glassCapsule()
+        .padding(.top, Spacing.xs)
+    }
+
+    private func segmentButton(_ segment: AppState.NetworkSegment) -> some View {
+        let isSelected = appState.networkSegment == segment
+        return Button {
+            guard !isSelected else { return }
+            withAnimation(.snappy) {
+                appState.networkSegment = segment
+            }
+        } label: {
+            Text(segment.rawValue)
+                .font(.subheadline.weight(isSelected ? .semibold : .regular))
+                .foregroundStyle(isSelected ? theme.accent : theme.textSecondary)
+                .padding(.horizontal, Spacing.md)
+                .padding(.vertical, Spacing.sm)
+                .background(
+                    isSelected ? theme.accent.opacity(0.18) : Color.clear,
+                    in: .capsule
+                )
+        }
+        .buttonStyle(.plain)
     }
 
     /// A pending scroll target always lives in the Interfaces segment; switch

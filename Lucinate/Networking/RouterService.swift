@@ -42,6 +42,13 @@ struct RouterService: Sendable {
         try await transport.call("luci-rpc", "getDHCPLeases", .object([:]))
     }
 
+    /// LuCI's aggregated hostname/IP hints (DHCP config + ARP/neighbor tables
+    /// + mDNS), keyed by MAC. Used to name clients whose lease has no
+    /// hostname (private Wi-Fi addresses, no DHCP option 12).
+    func hostHints() async throws -> JSONValue {
+        try await transport.call("luci-rpc", "getHostHints", .object([:]))
+    }
+
     // MARK: - network.interface
 
     func interfaceDump() async throws -> JSONValue {
@@ -104,6 +111,12 @@ struct RouterService: Sendable {
             if let mac = entry["mac"].stringValue { macs.append(mac.uppercased()) }
         }
         return macs
+    }
+
+    /// Raw assoclist payload ({"results": [...]}) including per-station
+    /// counters, for live per-client rate estimation.
+    func stationList(device: String) async throws -> JSONValue {
+        try await transport.call("iwinfo", "assoclist", .object(["device": .string(device)]))
     }
 
     func wifiScan(radio: String) async throws -> JSONValue {

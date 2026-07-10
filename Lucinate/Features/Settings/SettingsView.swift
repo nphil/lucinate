@@ -51,6 +51,38 @@ struct SettingsView: View {
                     .listRowBackground(theme.surface)
                 }
 
+                // Advanced network tools (moved here from the Network tab's
+                // toolbar menu so that screen stays immersive).
+                Section("Network") {
+                    NavigationLink {
+                        WifiSettingsView()
+                    } label: {
+                        Label("Wi-Fi Settings", systemImage: "wifi")
+                    }
+                    .listRowBackground(theme.surface)
+
+                    NavigationLink {
+                        StaticLeasesView()
+                    } label: {
+                        Label("Static Leases", systemImage: "pin")
+                    }
+                    .listRowBackground(theme.surface)
+
+                    NavigationLink {
+                        FirewallView()
+                    } label: {
+                        Label("Firewall", systemImage: "shield.lefthalf.filled")
+                    }
+                    .listRowBackground(theme.surface)
+
+                    NavigationLink {
+                        DiagnosticsView()
+                    } label: {
+                        Label("Diagnostics", systemImage: "stethoscope")
+                    }
+                    .listRowBackground(theme.surface)
+                }
+
                 Section("Routers") {
                     NavigationLink("Manage Routers") {
                         ManageRoutersView()

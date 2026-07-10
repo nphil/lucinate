@@ -259,6 +259,10 @@ struct BroadcastRadio: Sendable, Identifiable, Equatable {
     let channel: String
     /// This radio is the active hotel uplink (STA).
     let uplinkLocked: Bool
+    /// uci `encryption` of the AP iface (e.g. "psk2"/"sae"/"sae-mixed"/"none").
+    let encryption: String
+    /// uci `hidden` == "1" — SSID isn't broadcast.
+    let hidden: Bool
 
     init(
         device: String,
@@ -267,7 +271,9 @@ struct BroadcastRadio: Sendable, Identifiable, Equatable {
         ssid: String,
         apEnabled: Bool,
         channel: String,
-        uplinkLocked: Bool
+        uplinkLocked: Bool,
+        encryption: String = "none",
+        hidden: Bool = false
     ) {
         self.device = device
         self.band = band
@@ -276,9 +282,22 @@ struct BroadcastRadio: Sendable, Identifiable, Equatable {
         self.apEnabled = apEnabled
         self.channel = channel
         self.uplinkLocked = uplinkLocked
+        self.encryption = encryption
+        self.hidden = hidden
     }
 
     var id: String { device }
 
     var bandLabel: String { Travelmate.bandLabel(for: band) }
+
+    /// Human-friendly security name derived from the uci `encryption` value.
+    var securityLabel: String {
+        if encryption == "none" { return "Open" }
+        if encryption.contains("sae") {
+            return encryption.contains("mixed") ? "WPA2/3" : "WPA3"
+        }
+        if encryption.contains("psk2") { return "WPA2" }
+        if encryption.contains("psk") { return "WPA" }
+        return encryption.uppercased()
+    }
 }

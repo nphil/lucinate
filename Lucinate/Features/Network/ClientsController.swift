@@ -133,16 +133,19 @@ final class ClientsController {
         return result
     }
 
-    /// DHCP leases + wireless association MACs from one router, merged into
-    /// Client values. Throws only when neither source could be fetched.
+    /// DHCP(v4+v6) leases + wireless association MACs from one router, merged
+    /// into Client values and enriched with LuCI host hints. Throws only when
+    /// neither primary source could be fetched.
     private nonisolated static func gather(service: RouterService) async throws -> [Client] {
-        // DHCP leases: the payload usually wraps the list in "dhcp_leases",
-        // but tolerate the response being the bare array.
+        // DHCP leases: the payload usually wraps the lists in "dhcp_leases" /
+        // "dhcp6_leases", but tolerate the response being the bare array.
         var leases: [JSONValue] = []
+        var leases6: [JSONValue] = []
         var leaseError: Error?
         do {
             let json = try await service.dhcpLeases()
             leases = json["dhcp_leases"].arrayValue ?? json.arrayValue ?? []
+            leases6 = json["dhcp6_leases"].arrayValue ?? []
         } catch {
             leaseError = error
         }
@@ -189,7 +192,70 @@ final class ClientsController {
         for mac in wirelessMACs.sorted() where !leaseMACs.contains(mac) {
             merged.append(Client.fromWirelessStation(mac: mac))
         }
+
+        // Index by uppercased MAC for the enrichment passes below.
+        var indexByMAC: [String: Int] = [:]
+        for (index, client) in merged.enumerated() {
+            indexByMAC[client.macAddress.uppercased()] = index
+        }
+
+        // DHCPv6 leases carrying a MAC: enrich the existing client's IPv6
+        // addresses (and hostname when the v4 lease had none), or add a new
+        // row when no client exists for that MAC yet.
+        for lease6 in leases6 {
+            let mac = (lease6["macaddr"].coercedString ?? lease6["mac"].coercedString ?? "")
+                .uppercased()
+            guard !mac.isEmpty else { continue }
+            let ipv6 = Client.ipv6Addresses(from: lease6)
+            if let index = indexByMAC[mac] {
+                merged[index] = merged[index].enriched(
+                    hostname: lease6["hostname"].coercedString,
+                    ipAddress: nil,
+                    ipv6: ipv6)
+            } else {
+                var client = Client.fromLease(lease6)
+                if wirelessMACs.contains(mac) {
+                    client = client.with(connectionType: .wireless)
+                }
+                merged.append(client)
+                indexByMAC[mac] = merged.count - 1
+            }
+        }
+
+        // Host hints (LuCI's DHCP-config + ARP/neighbor + mDNS aggregation):
+        // fill in missing hostnames / IPs on EXISTING clients only — hints
+        // include stale entries, so never create rows from them. A hints
+        // failure must never fail the load.
+        if let hints = try? await service.hostHints(), let entries = hints.objectValue {
+            for (mac, hint) in entries {
+                guard let index = indexByMAC[mac.uppercased()] else { continue }
+                let ipv4 = firstString(in: hint["ipaddrs"]) ?? firstString(in: hint["ipv4"])
+                let ipv6 = stringList(in: hint["ip6addrs"]) + stringList(in: hint["ipv6"])
+                merged[index] = merged[index].enriched(
+                    hostname: hint["name"].coercedString,
+                    ipAddress: ipv4,
+                    ipv6: ipv6)
+            }
+        }
+
         return merged
+    }
+
+    // MARK: - Defensive hint readers (values may be a string or a list)
+
+    private nonisolated static func firstString(in value: JSONValue) -> String? {
+        if let single = value.coercedString, !single.isEmpty { return single }
+        return value.arrayValue?
+            .compactMap { $0.coercedString }
+            .first { !$0.isEmpty }
+    }
+
+    private nonisolated static func stringList(in value: JSONValue) -> [String] {
+        if let list = value.arrayValue {
+            return list.compactMap { $0.coercedString }.filter { !$0.isEmpty }
+        }
+        if let single = value.coercedString, !single.isEmpty { return [single] }
+        return []
     }
 
     // MARK: - Dedupe + sort
@@ -237,5 +303,111 @@ final class ClientsController {
         case .wired: return 1
         case .unknown: return 2
         }
+    }
+}
+
+// MARK: - Live per-client speeds (wireless assoclist polling)
+
+/// Instantaneous per-station throughput, derived from cumulative byte
+/// counters between two polls. MAC keys are uppercased.
+struct ClientRate: Equatable {
+    let rxBytesPerSecond: Double
+    let txBytesPerSecond: Double
+}
+
+/// Polls `iwinfo assoclist` for the ACTIVE router's wireless ifnames every
+/// 3 seconds and publishes per-MAC rates. Kept separate from
+/// ClientsController so the 3s tick only re-renders the tiny speed badges
+/// that read `rates` — never the client rows or list.
+@MainActor
+@Observable
+final class ClientSpeedsController {
+    private(set) var rates: [String: ClientRate] = [:]
+
+    private struct Sample {
+        let rxBytes: Double
+        let txBytes: Double
+        let timestamp: TimeInterval
+    }
+
+    @ObservationIgnored private var samples: [String: Sample] = [:]
+    @ObservationIgnored private var pollTask: Task<Void, Never>?
+
+    /// Starts polling the given wireless ifnames. Replaces any previous run.
+    func start(service: RouterService, devices: [String]) {
+        stop()
+        guard !devices.isEmpty else { return }
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.pollOnce(service: service, devices: devices)
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+            }
+        }
+    }
+
+    func stop() {
+        pollTask?.cancel()
+        pollTask = nil
+        samples = [:]
+        rates = [:]
+    }
+
+    private func pollOnce(service: RouterService, devices: [String]) async {
+        // Parallel + tolerant: a failing device just contributes no stations.
+        let stations = await withTaskGroup(of: [JSONValue].self) { group in
+            for device in devices {
+                group.addTask {
+                    (try? await service.stationList(device: device))?["results"]
+                        .arrayValue ?? []
+                }
+            }
+            var all: [JSONValue] = []
+            for await part in group { all.append(contentsOf: part) }
+            return all
+        }
+        guard !Task.isCancelled else { return }
+
+        let now = Date().timeIntervalSince1970
+        var newRates: [String: ClientRate] = [:]
+        for entry in stations {
+            guard let mac = entry["mac"].stringValue?.uppercased(), !mac.isEmpty else {
+                continue
+            }
+            // If this iwinfo build exposes no byte counters at all, publish
+            // nothing for the station (graceful degradation — no badge).
+            let rx = ClientSpeedsController.byteCounter(entry, direction: "rx")
+            let tx = ClientSpeedsController.byteCounter(entry, direction: "tx")
+            guard rx != nil || tx != nil else { continue }
+            let rxBytes = rx ?? 0
+            let txBytes = tx ?? 0
+
+            if let previous = samples[mac] {
+                let elapsed = now - previous.timestamp
+                if elapsed >= 0.5 {
+                    newRates[mac] = ClientRate(
+                        rxBytesPerSecond: max(0, (rxBytes - previous.rxBytes) / elapsed),
+                        txBytesPerSecond: max(0, (txBytes - previous.txBytes) / elapsed))
+                    samples[mac] = Sample(rxBytes: rxBytes, txBytes: txBytes, timestamp: now)
+                } else if let held = rates[mac] {
+                    // Too soon for a meaningful delta: keep the last rate.
+                    newRates[mac] = held
+                }
+            } else {
+                samples[mac] = Sample(rxBytes: rxBytes, txBytes: txBytes, timestamp: now)
+            }
+        }
+        rates = newRates
+    }
+
+    /// Cumulative byte counter, tried across the assoclist shapes seen in the
+    /// wild: entry["rx"]["bytes"], entry["rx_bytes"], entry["bytes"]["rx"].
+    private nonisolated static func byteCounter(
+        _ entry: JSONValue, direction: String
+    ) -> Double? {
+        if let value = entry[direction]["bytes"].doubleValue { return value }
+        if let value = entry["\(direction)_bytes"].doubleValue { return value }
+        if let value = entry["bytes"][direction].doubleValue { return value }
+        return nil
     }
 }
