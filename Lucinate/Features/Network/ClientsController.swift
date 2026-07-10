@@ -137,6 +137,15 @@ final class ClientsController {
     /// into Client values and enriched with LuCI host hints. Throws only when
     /// neither primary source could be fetched.
     private nonisolated static func gather(service: RouterService) async throws -> [Client] {
+        // MACs ever seen in an assoclist (persisted): lets sleeping Wi-Fi
+        // devices that dropped out of the assoclist keep their Wi-Fi type
+        // instead of falling back to "Unknown". Read once here, written once
+        // at the end (UserDefaults is thread-safe; gather runs off-main).
+        let defaults = UserDefaults.standard
+        let storedWirelessMACs =
+            (defaults.stringArray(forKey: Self.knownWirelessMACsKey) ?? [])
+            .map { $0.uppercased() }
+
         // DHCP leases: the payload usually wraps the lists in "dhcp_leases" /
         // "dhcp6_leases", but tolerate the response being the bare array.
         var leases: [JSONValue] = []
@@ -175,6 +184,11 @@ final class ClientsController {
         if let leaseError, !wirelessAvailable {
             throw leaseError
         }
+
+        // Kernel neighbor tables (ARP/NDP): liveness signal for wired and
+        // non-associated clients. Must never fail the load.
+        let neighborOutput = (try? await service.ipNeighbors()) ?? ""
+        let neighborStates = Self.parseNeighborStates(neighborOutput)
 
         // Merge: leases first (upgrading to .wireless when the MAC is
         // associated), then association-only stations without a lease.
@@ -238,7 +252,87 @@ final class ClientsController {
             }
         }
 
+        // Presence + connection-type memory pass (after all enrichment).
+        let knownWirelessMACs = Set(storedWirelessMACs).union(wirelessMACs)
+        for index in merged.indices {
+            var client = merged[index]
+            let mac = client.macAddress.uppercased()
+
+            // A MAC ever seen associated is a Wi-Fi client, even while asleep.
+            if client.connectionType == .unknown, knownWirelessMACs.contains(mac) {
+                client = client.with(connectionType: .wireless)
+            }
+
+            let presence: Client.Presence
+            if wirelessMACs.contains(mac) {
+                presence = .online
+            } else {
+                switch neighborStates[mac] ?? "" {
+                case "REACHABLE", "DELAY", "PROBE":
+                    presence = .online
+                case "STALE":
+                    presence = .idle
+                default:
+                    presence = .offline
+                }
+            }
+
+            // An awake device that isn't associated to Wi-Fi is on a cable.
+            if client.connectionType == .unknown, presence == .online {
+                client = client.with(connectionType: .wired)
+            }
+
+            merged[index] = client.with(presence: presence)
+        }
+
+        // Persist the wireless-MAC memory (only when this gather saw
+        // something new), most-recently-seen first, capped.
+        if !wirelessMACs.isEmpty, !wirelessMACs.isSubset(of: Set(storedWirelessMACs)) {
+            var ordered = wirelessMACs.sorted()
+            ordered.append(contentsOf: storedWirelessMACs.filter { !wirelessMACs.contains($0) })
+            defaults.set(
+                Array(ordered.prefix(Self.knownWirelessMACsCap)),
+                forKey: Self.knownWirelessMACsKey)
+        }
+
         return merged
+    }
+
+    // MARK: - Neighbor (ARP/NDP) parsing
+
+    private nonisolated static let knownWirelessMACsKey = "known_wireless_macs"
+    private nonisolated static let knownWirelessMACsCap = 512
+
+    /// Parses `ip -4/-6 neigh show` lines such as
+    /// `192.168.1.50 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE` into
+    /// [uppercased MAC: state]. The state is the last whitespace token; lines
+    /// without an lladdr, or in FAILED/INCOMPLETE state, carry no liveness.
+    /// When a MAC appears more than once (v4 + v6), the most-alive state wins.
+    private nonisolated static func parseNeighborStates(_ output: String) -> [String: String] {
+        var states: [String: String] = [:]
+        for line in output.split(separator: "\n") {
+            let tokens = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            guard tokens.count >= 2 else { continue }
+            guard let lladdrIndex = tokens.firstIndex(of: "lladdr"),
+                lladdrIndex + 1 < tokens.count
+            else { continue }
+            let mac = tokens[lladdrIndex + 1].uppercased()
+            let state = tokens[tokens.count - 1]
+            if state == "FAILED" || state == "INCOMPLETE" { continue }
+            if let existing = states[mac], aliveRank(existing) >= aliveRank(state) { continue }
+            states[mac] = state
+        }
+        return states
+    }
+
+    /// REACHABLE > DELAY/PROBE > STALE > anything else.
+    private nonisolated static func aliveRank(_ state: String) -> Int {
+        switch state {
+        case "REACHABLE": return 3
+        case "DELAY", "PROBE": return 2
+        case "STALE": return 1
+        default: return 0
+        }
     }
 
     // MARK: - Defensive hint readers (values may be a string or a list)
@@ -261,8 +355,9 @@ final class ClientsController {
     // MARK: - Dedupe + sort
 
     /// Deduplicates by uppercased MAC (preferring entries that carry a real
-    /// hostname / IP), then sorts wireless → wired → unknown, hostname
-    /// case-insensitive within each group with "Unknown" hosts last.
+    /// hostname / IP), then sorts online → idle → offline, then wireless →
+    /// wired → unknown, hostname case-insensitive within each group with
+    /// "Unknown" hosts last.
     private nonisolated static func dedupeAndSort(_ clients: [Client]) -> [Client] {
         var byMAC: [String: Client] = [:]
         for client in clients {
@@ -275,6 +370,10 @@ final class ClientsController {
         }
 
         return byMAC.values.sorted { a, b in
+            let presenceA = presenceRank(a.presence)
+            let presenceB = presenceRank(b.presence)
+            if presenceA != presenceB { return presenceA < presenceB }
+
             let rankA = typeRank(a.connectionType)
             let rankB = typeRank(b.connectionType)
             if rankA != rankB { return rankA < rankB }
@@ -302,6 +401,14 @@ final class ClientsController {
         case .wireless: return 0
         case .wired: return 1
         case .unknown: return 2
+        }
+    }
+
+    private nonisolated static func presenceRank(_ presence: Client.Presence) -> Int {
+        switch presence {
+        case .online: return 0
+        case .idle: return 1
+        case .offline: return 2
         }
     }
 }

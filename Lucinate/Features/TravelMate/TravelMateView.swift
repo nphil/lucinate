@@ -234,15 +234,6 @@ struct TravelMateView: View {
                     }
                 }
 
-                if !enabledRadios.isEmpty {
-                    Text(
-                        "Same name on both bands enables automatic band steering. "
-                            + "Use different names to force a device onto 2.4 or 5 GHz."
-                    )
-                    .font(.caption)
-                    .foregroundStyle(theme.textSecondary)
-                    .padding(.top, Spacing.xs)
-                }
             }
         }
     }

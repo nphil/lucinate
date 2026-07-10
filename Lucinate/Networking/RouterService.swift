@@ -24,6 +24,9 @@ struct RouterService: Sendable {
         _ = try await transport.call("system", "reboot", .object([:]))
     }
 
+    /// NOTE: `system exec` is NOT a standard ubus method on stock OpenWrt —
+    /// prefer `fileExec` with a command whose exact argument form is covered
+    /// by an rpcd file ACL (LuCI grants specific command lines only).
     func systemExec(_ command: String) async throws -> JSONValue {
         try await transport.call("system", "exec", .object(["command": .string(command)]))
     }
@@ -139,6 +142,16 @@ struct RouterService: Sendable {
             ]))
     }
 
+    /// Kernel neighbor tables (ARP/NDP). LuCI's ACL grants exactly these
+    /// command lines — do not alter the argument forms.
+    func ipNeighbors() async throws -> String {
+        let v4 = try await fileExec(command: "/sbin/ip", params: ["-4", "neigh", "show"])
+        let v6 = try? await fileExec(command: "/sbin/ip", params: ["-6", "neigh", "show"])
+        let out4 = v4["stdout"].stringValue ?? ""
+        let out6 = v6?["stdout"].stringValue ?? ""
+        return out4 + "\n" + out6
+    }
+
     // MARK: - wireguard (optional package)
 
     func wireGuardInstances() async throws -> JSONValue {
@@ -177,7 +190,7 @@ struct RouterService: Sendable {
         try await uciSet(
             config: "wireless", section: section, values: ["disabled": disabled ? "1" : "0"])
         try await uciCommit(config: "wireless")
-        try await systemExec("wifi reload")
+        try await wifiReload()
     }
 
     func setTravelmateEnabled(_ enabled: Bool) async throws {
@@ -314,7 +327,7 @@ struct RouterService: Sendable {
     }
 
     func wakeOnLan(mac: String) async throws {
-        _ = try await systemExec("etherwake -b \(mac)")
+        _ = try await fileExec(command: "/usr/bin/etherwake", params: ["-b", mac])
     }
 
     private static let blockRulePrefix = "lucinate_block_"

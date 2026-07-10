@@ -41,6 +41,9 @@ struct NetworkView: View {
         }
         .padding(4)
         .glassCapsule()
+        // The whole capsule (including the rim between/around the buttons)
+        // must win hit-testing over list rows scrolling beneath it.
+        .contentShape(.capsule)
         .padding(.top, Spacing.xs)
     }
 
@@ -55,12 +58,13 @@ struct NetworkView: View {
             Text(segment.rawValue)
                 .font(.subheadline.weight(isSelected ? .semibold : .regular))
                 .foregroundStyle(isSelected ? theme.accent : theme.textSecondary)
-                .padding(.horizontal, Spacing.md)
-                .padding(.vertical, Spacing.sm)
+                .padding(.horizontal, Spacing.lg)
+                .frame(minHeight: 44)  // comfortable tap target over scrolling rows
                 .background(
                     isSelected ? theme.accent.opacity(0.18) : Color.clear,
                     in: .capsule
                 )
+                .contentShape(.capsule)
         }
         .buttonStyle(.plain)
     }
