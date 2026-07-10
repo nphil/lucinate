@@ -35,7 +35,7 @@ final class LogViewerController {
             lines = stdout
                 .split(separator: "\n", omittingEmptySubsequences: true)
                 .enumerated()
-                .map { Line(id: $0.offset, text: String($0.element)) }
+                .map { Line(id: $0.offset, text: Self.cleaned(String($0.element), kind: kind)) }
             error = nil
         } catch {
             if lines.isEmpty {
@@ -43,6 +43,16 @@ final class LogViewerController {
             }
         }
         hasLoaded = true
+    }
+
+    /// dmesg -r prefixes each line with a numeric priority ("<6>..."); strip
+    /// it for display.
+    private static func cleaned(_ line: String, kind: LogViewerView.Kind) -> String {
+        guard kind == .kernel, line.hasPrefix("<"),
+            let close = line.firstIndex(of: ">"),
+            line.distance(from: line.startIndex, to: close) <= 3
+        else { return line }
+        return String(line[line.index(after: close)...])
     }
 
     /// Tries the primary binary path; on a thrown error, tries the alternate
@@ -92,10 +102,13 @@ struct LogViewerView: View {
             }
         }
 
+        /// rpcd's file plugin enforces exact command-line ACLs; LuCI ships
+        /// grants for "/sbin/logread -e ^" and "/bin/dmesg -r", so we must
+        /// invoke precisely those forms.
         var params: [String] {
             switch self {
-            case .system: return ["-l", "300"]
-            case .kernel: return []
+            case .system: return ["-e", "^"]
+            case .kernel: return ["-r"]
             }
         }
     }

@@ -64,7 +64,7 @@ struct InterfacesListView: View {
                 .padding(.top, Spacing.sm)
                 .padding(.bottom, Spacing.xxl)
             }
-            .contentMargins(.top, 60, for: .scrollContent)
+            .contentMargins(.top, 68, for: .scrollContent)
             .background(theme.background)
             .refreshable {
                 Haptics.impact(.medium)

@@ -83,42 +83,39 @@ struct BroadcastEditorSheet: View {
         }
     }
 
-    @ViewBuilder
+    /// True when the AP currently has no password set.
+    private var isOpenNetwork: Bool { radio.encryption == "none" }
+
     private var securitySection: some View {
-        if radio.encryption == "none" {
-            Section {
-                Text("Open network — no password")
-                    .font(.caption)
-                    .foregroundStyle(theme.textSecondary)
-                    .listRowBackground(theme.surface)
-            }
-        } else {
-            Section {
-                HStack(spacing: Spacing.sm) {
-                    Group {
-                        if showPassword {
-                            TextField("Unchanged", text: $password)
-                        } else {
-                            SecureField("Unchanged", text: $password)
-                        }
+        Section {
+            HStack(spacing: Spacing.sm) {
+                Group {
+                    if showPassword {
+                        TextField(isOpenNetwork ? "Set a password" : "Unchanged", text: $password)
+                    } else {
+                        SecureField(isOpenNetwork ? "Set a password" : "Unchanged", text: $password)
                     }
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    Button {
-                        showPassword.toggle()
-                    } label: {
-                        Image(systemName: showPassword ? "eye.slash" : "eye")
-                            .foregroundStyle(theme.textSecondary)
-                    }
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel(showPassword ? "Hide password" : "Show password")
                 }
-                .listRowBackground(theme.surface)
-            } header: {
-                Text("Security")
-            } footer: {
-                Text("Leave blank to keep the current password. Minimum 8 characters.")
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                Button {
+                    showPassword.toggle()
+                } label: {
+                    Image(systemName: showPassword ? "eye.slash" : "eye")
+                        .foregroundStyle(theme.textSecondary)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel(showPassword ? "Hide password" : "Show password")
             }
+            .listRowBackground(theme.surface)
+        } header: {
+            Text("Security")
+        } footer: {
+            Text(
+                isOpenNetwork
+                    ? "This network is currently open. Setting a password secures it with WPA2/WPA3. Minimum 8 characters."
+                    : "Leave blank to keep the current password. Minimum 8 characters."
+            )
         }
     }
 
@@ -186,7 +183,7 @@ struct BroadcastEditorSheet: View {
     }
 
     private var passwordChanged: Bool {
-        !password.isEmpty && radio.encryption != "none"
+        !password.isEmpty
     }
 
     private var channelChanged: Bool {
@@ -211,6 +208,9 @@ struct BroadcastEditorSheet: View {
                 ssid: trimmedName,
                 password: password.isEmpty ? nil : password,
                 hidden: nil,
+                // Securing a previously-open network: WPA2/WPA3 mixed for
+                // broad device compatibility.
+                encryption: (isOpenNetwork && !password.isEmpty) ? "sae-mixed" : nil,
                 service: service
             )
         }

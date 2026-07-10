@@ -205,7 +205,14 @@ final class TravelmateController {
                     apEnabled: (ap["disabled"].coercedString ?? "0") != "1",
                     channel: channels[dev] ?? "auto",
                     uplinkLocked: !activeDevice.isEmpty && dev == activeDevice,
-                    encryption: ap["encryption"].coercedString ?? "none",
+                    // Some firmwares omit `encryption` on the AP section even
+                    // when a key is set — a present key means "not open".
+                    encryption: {
+                        let enc = ap["encryption"].coercedString ?? ""
+                        if !enc.isEmpty && enc != "none" { return enc }
+                        let key = ap["key"].coercedString ?? ""
+                        return key.isEmpty ? "none" : "psk2"
+                    }(),
                     hidden: (ap["hidden"].coercedString ?? "0") == "1"
                 ))
         }
@@ -361,6 +368,7 @@ final class TravelmateController {
     @discardableResult
     func updateBroadcast(
         section: String, ssid: String, password: String?, hidden: Bool?,
+        encryption: String? = nil,
         service: RouterService
     ) async -> Bool {
         let trimmed = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -375,6 +383,10 @@ final class TravelmateController {
                 return false
             }
             values["key"] = password
+            // Securing a previously-open network needs an encryption mode too.
+            if let encryption, !encryption.isEmpty {
+                values["encryption"] = encryption
+            }
         }
         if let hidden {
             values["hidden"] = hidden ? "1" : "0"
