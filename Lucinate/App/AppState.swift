@@ -81,6 +81,26 @@ final class AppState {
     var pendingCertificate: String?
     private var pendingLogin: (address: String, username: String, password: String)?
 
+    /// A silent auto-reconnect (from saved credentials) is in flight on the
+    /// Login screen. The login form stays fully usable underneath so the user
+    /// is never trapped when the router is unreachable.
+    private(set) var isAutoConnecting = false
+    /// Hostname/address shown in the "Connecting to …" banner.
+    private(set) var autoConnectTarget: String?
+    private var autoConnectTask: Task<Void, Never>?
+
+    /// Saved credentials for pre-filling the login form (so a manual retry is
+    /// one tap when auto-connect couldn't reach the router).
+    var savedLoginPrefill: (address: String, username: String, password: String)? {
+        let store = KeychainStore.shared
+        guard let ip = store.string(for: KeychainStore.Key.ipAddress),
+            let username = store.string(for: KeychainStore.Key.username),
+            let password = store.string(for: KeychainStore.Key.password)
+        else { return nil }
+        let useHttps = store.string(for: KeychainStore.Key.useHttps) == "true"
+        return (useHttps ? "https://\(ip)" : ip, username, password)
+    }
+
     // MARK: Reboot
 
     private(set) var isRebooting = false
@@ -127,20 +147,47 @@ final class AppState {
             return
         }
 
-        let store = KeychainStore.shared
-        guard let ip = store.string(for: KeychainStore.Key.ipAddress),
-            let username = store.string(for: KeychainStore.Key.username),
-            let password = store.string(for: KeychainStore.Key.password)
-        else {
+        // Brief branded splash, then always land on the Login screen — never
+        // block the splash on a network call. When the router is reachable the
+        // background auto-connect promotes us to the app; when it isn't, the
+        // user is already on Login (reviewer mode + manual retry available).
+        try? await Task.sleep(nanoseconds: 900_000_000)
+
+        guard let saved = savedLoginPrefill else {
             phase = .login
             return
         }
-        let useHttps = store.string(for: KeychainStore.Key.useHttps) == "true"
-        let address = useHttps ? "https://\(ip)" : ip
-        let ok = await login(address: address, username: username, password: password, quiet: true)
-        if !ok {
-            phase = .login
+        phase = .login
+        beginAutoConnect(
+            address: saved.address, username: saved.username, password: saved.password)
+    }
+
+    /// Silent reconnect from saved credentials, run in the background so the
+    /// Login screen stays interactive. Fails fast (one attempt) — a dead router
+    /// shouldn't leave the user waiting.
+    func beginAutoConnect(address: String, username: String, password: String) {
+        autoConnectTask?.cancel()
+        isAutoConnecting = true
+        autoConnectTarget =
+            selectedRouter?.lastKnownHostname ?? (try? RouterEndpoint.parse(address))?.host
+            ?? address
+        autoConnectTask = Task { [weak self] in
+            guard let self else { return }
+            _ = await self.login(
+                address: address, username: username, password: password,
+                quiet: true, maxAttempts: 1)
+            self.isAutoConnecting = false
+            self.autoConnectTask = nil
         }
+    }
+
+    /// User dismissed the "Connecting…" banner to log in manually / enter
+    /// reviewer mode. Cancels the silent attempt (quiet mode makes the
+    /// resulting cancellation harmless — no cert dialog, no error).
+    func cancelAutoConnect() {
+        autoConnectTask?.cancel()
+        autoConnectTask = nil
+        isAutoConnecting = false
     }
 
     // MARK: - Login / logout
@@ -148,9 +195,13 @@ final class AppState {
     /// Returns true on success. On TLS trust failure, stashes the attempt and
     /// sets `pendingCertificate` so the UI can offer "Accept Risk".
     @discardableResult
-    func login(address: String, username: String, password: String, quiet: Bool = false)
-        async -> Bool
-    {
+    func login(
+        address: String, username: String, password: String,
+        quiet: Bool = false, maxAttempts: Int = 3
+    ) async -> Bool {
+        // A manual login supersedes any in-flight silent auto-connect.
+        if !quiet { cancelAutoConnect() }
+
         loginError = nil
         isLoggingIn = true
         defer { isLoggingIn = false }
@@ -159,7 +210,7 @@ final class AppState {
         do {
             endpoint = try RouterEndpoint.parse(address)
         } catch {
-            loginError = error.localizedDescription
+            if !quiet { loginError = error.localizedDescription }
             return false
         }
 
@@ -168,7 +219,8 @@ final class AppState {
 
         let newClient = UbusClient(endpoint: endpoint)
         do {
-            let result = try await newClient.login(username: username, password: password)
+            let result = try await newClient.login(
+                username: username, password: password, maxAttempts: maxAttempts)
             client = newClient
             service = RouterService(transport: newClient)
             isReviewerMode = false
@@ -186,10 +238,13 @@ final class AppState {
             return true
         } catch let error as UbusError {
             await newClient.invalidate()
-            if case .certificateNotTrusted(let hostPort) = error {
+            // Silent auto-connect never pops dialogs or shows errors — a
+            // returning user's cert is already trusted, and a cancelled/timed-
+            // out silent attempt must not surface as a certificate prompt.
+            if case .certificateNotTrusted(let hostPort) = error, !quiet {
                 pendingLogin = (address, username, password)
                 pendingCertificate = hostPort
-                if !quiet { loginError = nil }
+                loginError = nil
             } else if !quiet {
                 loginError = error.localizedDescription
             }

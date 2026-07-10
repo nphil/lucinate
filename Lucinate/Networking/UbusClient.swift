@@ -153,9 +153,16 @@ actor UbusClient: UbusCalling {
         let useHttps: Bool
     }
 
-    func login(username: String, password: String) async throws -> LoginResult {
+    /// `maxAttempts` caps the transient-retry loop. Pass 1 for a silent
+    /// background auto-connect so an unreachable router fails fast instead of
+    /// retrying for the better part of a minute.
+    func login(username: String, password: String, maxAttempts: Int = 3) async throws
+        -> LoginResult
+    {
+        let attempts = max(1, maxAttempts)
         var lastError: Error = UbusError.badCredentials
-        for attempt in 1...3 {
+        for attempt in 1...attempts {
+            if Task.isCancelled { throw CancellationError() }
             do {
                 return try await loginOnce(username: username, password: password)
             } catch let error as UbusError {
@@ -168,7 +175,7 @@ actor UbusClient: UbusCalling {
             } catch {
                 lastError = error
             }
-            if attempt < 3 {
+            if attempt < attempts {
                 try? await Task.sleep(nanoseconds: UInt64(attempt) * 500_000_000)
             }
         }
