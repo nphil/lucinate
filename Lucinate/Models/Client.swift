@@ -118,25 +118,12 @@ struct Client: Sendable, Identifiable, Equatable {
             expiresAtTimestamp = Int(Date().timeIntervalSince1970) + expires
         }
 
-        var ipv6Addresses: [String] = []
-        if let list = lease["ipv6addrs"].arrayValue {
-            ipv6Addresses = list.compactMap { $0.coercedString }.filter { !$0.isEmpty }
-        } else if !lease["ipv6addr"].isNull {
-            // Some APIs use a single string, a comma-separated string, or a list.
-            if let single = lease["ipv6addr"].stringValue {
-                ipv6Addresses = single
-                    .split(separator: ",")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty }
-            } else if let list = lease["ipv6addr"].arrayValue {
-                ipv6Addresses = list.compactMap { $0.coercedString }.filter { !$0.isEmpty }
-            }
-        }
+        let ipv6 = Client.ipv6Addresses(from: lease)
 
         return Client(
             ipAddress: string("ipaddr", "ip") ?? "N/A",
             macAddress: string("macaddr", "mac") ?? "N/A",
-            hostname: string("hostname", "name") ?? "Unknown",
+            hostname: sanitizedHostname(string("hostname", "name")) ?? "Unknown",
             hostId: string("hostid", "duid"),
             leaseTime: expires,
             vendor: string("vendor"),
@@ -145,8 +132,42 @@ struct Client: Sendable, Identifiable, Equatable {
             activeTime: activeTime,
             expiresAt: expiresAtTimestamp,
             connectionType: determineConnectionType(lease),
-            ipv6Addresses: ipv6Addresses
+            ipv6Addresses: ipv6
         )
+    }
+
+    /// dnsmasq stores "*" (and some builds "?") for leases without a
+    /// hostname — treat those, and empty strings, as missing.
+    static func sanitizedHostname(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == "*" || trimmed == "?" { return nil }
+        return trimmed
+    }
+
+    /// Defensive IPv6 extraction across the shapes seen in the wild:
+    /// "ipv6addrs"/"ip6addrs" lists, and "ipv6addr"/"ip6addr" as a single
+    /// string, a comma-separated string, or a list.
+    static func ipv6Addresses(from json: JSONValue) -> [String] {
+        var found: [String] = []
+        for key in ["ipv6addrs", "ip6addrs"] {
+            if let list = json[key].arrayValue {
+                found.append(contentsOf: list.compactMap { $0.coercedString })
+            }
+        }
+        for key in ["ipv6addr", "ip6addr"] {
+            let value = json[key]
+            if let single = value.stringValue {
+                found.append(
+                    contentsOf: single
+                        .split(separator: ",")
+                        .map { $0.trimmingCharacters(in: .whitespaces) })
+            } else if let list = value.arrayValue {
+                found.append(contentsOf: list.compactMap { $0.coercedString })
+            }
+        }
+        var seen = Set<String>()
+        return found.filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
     /// Creates a Client from a wireless association MAC address (no DHCP data).
@@ -161,6 +182,38 @@ struct Client: Sendable, Identifiable, Equatable {
             macAddress: mac,
             hostname: hostname ?? "Unknown",
             connectionType: .wireless
+        )
+    }
+
+    /// Copy helper that fills ONLY missing fields (used by host-hint /
+    /// DHCPv6 enrichment): "Unknown" hostname → replace, "N/A" IP → replace,
+    /// append IPv6 addresses not already present. Everything else is kept.
+    func enriched(hostname: String?, ipAddress: String?, ipv6: [String]) -> Client {
+        var newHostname = self.hostname
+        if newHostname == "Unknown", let candidate = Client.sanitizedHostname(hostname) {
+            newHostname = candidate
+        }
+        var newIP = self.ipAddress
+        if newIP == "N/A", let ipAddress, !ipAddress.isEmpty {
+            newIP = ipAddress
+        }
+        var newIPv6 = ipv6Addresses
+        for address in ipv6 where !address.isEmpty && !newIPv6.contains(address) {
+            newIPv6.append(address)
+        }
+        return Client(
+            ipAddress: newIP,
+            macAddress: macAddress,
+            hostname: newHostname,
+            hostId: hostId,
+            leaseTime: leaseTime,
+            vendor: vendor,
+            dnsName: dnsName,
+            clientId: clientId,
+            activeTime: activeTime,
+            expiresAt: expiresAt,
+            connectionType: connectionType,
+            ipv6Addresses: newIPv6
         )
     }
 

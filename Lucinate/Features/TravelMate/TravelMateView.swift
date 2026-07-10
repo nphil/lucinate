@@ -9,7 +9,6 @@ struct TravelMateView: View {
 
     @State private var controller = TravelmateController()
     @State private var showAddSheet = false
-    @State private var channelPickerRadio: BroadcastRadio?
     @State private var editingRadio: BroadcastRadio?
     @State private var uplinkToForget: TravelmateUplink?
     @State private var pendingBandDevices: Set<String>?
@@ -29,11 +28,8 @@ struct TravelMateView: View {
             .sheet(isPresented: $showAddSheet) {
                 AddUplinkSheet(controller: controller)
             }
-            .sheet(item: $channelPickerRadio) { radio in
-                ChannelPickerSheet(controller: controller, radio: radio)
-            }
             .sheet(item: $editingRadio) { radio in
-                EditBroadcastNameSheet(controller: controller, radio: radio)
+                BroadcastEditorSheet(controller: controller, radio: radio)
             }
             .alert(
                 "Forget Network?",
@@ -229,11 +225,10 @@ struct TravelMateView: View {
 
                 if has24 && has5 {
                     bandSelector
-                        .padding(.top, Spacing.xs)
                 }
 
                 ForEach(Array(enabledRadios.enumerated()), id: \.element.id) { index, radio in
-                    broadcastRadioBlock(radio)
+                    broadcastIdentityBlock(radio)
                     if index < enabledRadios.count - 1 {
                         Divider().overlay(theme.separator)
                     }
@@ -252,30 +247,33 @@ struct TravelMateView: View {
         }
     }
 
-    /// One broadcast radio: its band, an editable network name, and the
-    /// channel control.
-    private func broadcastRadioBlock(_ radio: BroadcastRadio) -> some View {
+    /// One broadcast radio as a tappable identity card: glyph, SSID, and a
+    /// band/channel/security caption. Tapping opens the full editor sheet
+    /// (name + password + channel).
+    private func broadcastIdentityBlock(_ radio: BroadcastRadio) -> some View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
-            Text(radio.bandLabel)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(theme.textPrimary)
-
             Button {
+                Haptics.selection()
                 editingRadio = radio
             } label: {
                 HStack(spacing: Spacing.sm) {
-                    Image(systemName: "pencil")
-                        .foregroundStyle(theme.textSecondary)
+                    Image(systemName: "wifi")
+                        .foregroundStyle(theme.accent)
+                        .frame(width: 36, height: 36)
+                        .background(theme.accent.opacity(0.15), in: .circle)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Network name")
+                        Text(radio.ssid.isEmpty ? "Unnamed network" : radio.ssid)
+                            .font(.cardTitle)
+                            .foregroundStyle(
+                                radio.ssid.isEmpty ? theme.textSecondary : theme.textPrimary
+                            )
+                            .lineLimit(1)
+                        Text(identityCaption(radio))
                             .font(.caption)
                             .foregroundStyle(theme.textSecondary)
-                        Text(radio.ssid.isEmpty ? "Unnamed" : radio.ssid)
-                            .font(.subheadline)
-                            .foregroundStyle(theme.textPrimary)
                             .lineLimit(1)
                     }
-                    Spacer()
+                    Spacer(minLength: Spacing.sm)
                     Image(systemName: "chevron.right")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(theme.textSecondary)
@@ -284,10 +282,31 @@ struct TravelMateView: View {
             }
             .buttonStyle(.plain)
             .disabled(controller.isBusy)
+            .accessibilityLabel(
+                "Edit \(radio.ssid.isEmpty ? "unnamed" : radio.ssid) — \(radio.bandLabel)"
+            )
 
-            channelTile(radio)
+            if radio.uplinkLocked {
+                HStack(spacing: Spacing.xs) {
+                    Image(systemName: "lock.fill")
+                        .font(.caption2)
+                    Text("Channel locked to hotel uplink")
+                        .font(.caption2)
+                }
+                .foregroundStyle(theme.textSecondary)
+            }
         }
         .padding(.vertical, Spacing.xs)
+    }
+
+    /// "5 GHz · Ch 40 · WPA2" (plus " · Hidden" for a hidden SSID).
+    private func identityCaption(_ radio: BroadcastRadio) -> String {
+        var parts: [String] = []
+        if !radio.bandLabel.isEmpty { parts.append(radio.bandLabel) }
+        parts.append(radio.channel == "auto" ? "Auto" : "Ch \(radio.channel)")
+        parts.append(radio.securityLabel)
+        if radio.hidden { parts.append("Hidden") }
+        return parts.joined(separator: " · ")
     }
 
     private var bandSelector: some View {
@@ -326,44 +345,6 @@ struct TravelMateView: View {
         }
         .buttonStyle(.plain)
         .disabled(controller.isBusy)
-    }
-
-    private func channelTile(_ radio: BroadcastRadio) -> some View {
-        Button {
-            channelPickerRadio = radio
-        } label: {
-            HStack(spacing: Spacing.sm) {
-                Image(systemName: "wifi")
-                    .foregroundStyle(theme.textSecondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Channel")
-                        .font(.subheadline)
-                        .foregroundStyle(theme.textPrimary)
-                    if radio.uplinkLocked {
-                        Text("Locked to hotel uplink")
-                            .font(.caption)
-                            .foregroundStyle(theme.textSecondary)
-                    }
-                }
-                Spacer()
-                if radio.uplinkLocked {
-                    Image(systemName: "lock.fill")
-                        .font(.subheadline)
-                        .foregroundStyle(theme.textSecondary)
-                } else {
-                    Text(radio.channel == "auto" ? "Auto" : "Ch \(radio.channel)")
-                        .font(.subheadline)
-                        .foregroundStyle(theme.textSecondary)
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(theme.textSecondary)
-                }
-            }
-            .padding(.vertical, Spacing.xs)
-            .contentShape(.rect)
-        }
-        .buttonStyle(.plain)
-        .disabled(radio.uplinkLocked || controller.isBusy)
     }
 
     private func requestBand(_ selection: String) {
@@ -546,72 +527,6 @@ struct TravelMateView: View {
             } else {
                 Haptics.warning()
                 appState.showToast(controller.error ?? "Action failed")
-            }
-        }
-    }
-}
-
-/// Rename a broadcast radio's AP (the SSID your devices join). Editing 2.4 and
-/// 5 GHz independently lets the user share a name (band steering) or split them.
-private struct EditBroadcastNameSheet: View {
-    @Environment(AppState.self) private var appState
-    @Environment(\.theme) private var theme
-    @Environment(\.dismiss) private var dismiss
-
-    let controller: TravelmateController
-    let radio: BroadcastRadio
-
-    @State private var name = ""
-    @State private var saving = false
-
-    private var trimmed: String {
-        name.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    TextField("Network name", text: $name)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                } header: {
-                    Text("\(radio.bandLabel) network name")
-                } footer: {
-                    Text("Devices on this band briefly disconnect when the name changes.")
-                }
-            }
-            .scrollContentBackground(.hidden)
-            .background(theme.background)
-            .navigationTitle("Rename")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Save") { save() }
-                        .disabled(trimmed.isEmpty || trimmed == radio.ssid || saving)
-                }
-            }
-        }
-        .onAppear { name = radio.ssid }
-    }
-
-    private func save() {
-        guard let service = appState.service else { return }
-        saving = true
-        Task {
-            let ok = await controller.setBroadcastName(
-                section: radio.apSection, ssid: trimmed, service: service)
-            saving = false
-            if ok {
-                Haptics.success()
-                appState.showToast("Wi-Fi name updated")
-                dismiss()
-            } else {
-                Haptics.error()
-                appState.showToast(controller.error ?? "Couldn't rename network")
             }
         }
     }

@@ -9,7 +9,7 @@ struct InterfacesListView: View {
     @Environment(\.theme) private var theme
 
     var controller: InterfacesController
-    var searchText: String
+    @Binding var searchText: String
 
     @State private var expandedIDs: Set<String> = []
 
@@ -19,6 +19,7 @@ struct InterfacesListView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: Spacing.sm) {
+                    SearchField(text: $searchText, prompt: "Search interfaces…")
                     if controller.isLoading {
                         skeletonRows
                     } else if let error = controller.error, controller.isEmpty {
@@ -63,6 +64,7 @@ struct InterfacesListView: View {
                 .padding(.top, Spacing.sm)
                 .padding(.bottom, Spacing.xxl)
             }
+            .contentMargins(.top, 60, for: .scrollContent)
             .background(theme.background)
             .refreshable {
                 Haptics.impact(.medium)
@@ -179,6 +181,23 @@ struct InterfacesListView: View {
     }
 }
 
+// MARK: - Protocol display names
+
+/// Human-readable label for a uci interface proto. Notably, proto "none" is
+/// a valid unmanaged interface (e.g. Tailscale), not an error — show
+/// "Unmanaged" instead of the raw token.
+private func protocolDisplayName(_ raw: String) -> String {
+    switch raw.lowercased() {
+    case "", "none": return "Unmanaged"
+    case "dhcp": return "DHCP"
+    case "dhcpv6": return "DHCPv6"
+    case "static": return "Static"
+    case "pppoe": return "PPPoE"
+    case "wireguard": return "WireGuard"
+    default: return raw.capitalized
+    }
+}
+
 // MARK: - Wired interface card
 
 private struct WiredInterfaceCard: View {
@@ -234,6 +253,7 @@ private struct WiredInterfaceCard: View {
 
     /// "proto • ip (+N)" — mirrors _buildMinimalInterfaceSubtitle.
     private var subtitle: String {
+        let proto = protocolDisplayName(iface.protocolName)
         var shown: String?
         var extra = 0
         if let ipv4 = iface.ipAddress, !ipv4.isEmpty {
@@ -242,9 +262,9 @@ private struct WiredInterfaceCard: View {
         } else if let firstV6 = iface.ipv6Addresses.first {
             shown = firstV6
         }
-        guard let shown else { return iface.protocolName }
-        if extra > 0 { return "\(iface.protocolName) • \(shown)  +\(extra)" }
-        return "\(iface.protocolName) • \(shown)"
+        guard let shown else { return proto }
+        if extra > 0 { return "\(proto) • \(shown)  +\(extra)" }
+        return "\(proto) • \(shown)"
     }
 
     private var protoIcon: String {
@@ -271,6 +291,7 @@ private struct WiredInterfaceCard: View {
     private var details: some View {
         VStack(spacing: 0) {
             IfaceDetailRow(label: "Device", value: iface.device, monospaced: true)
+            IfaceDetailRow(label: "Protocol", value: protocolDisplayName(iface.protocolName))
             IfaceDetailRow(label: "Uptime", value: iface.formattedUptime)
             if let ip = iface.ipAddress, !ip.isEmpty {
                 IfaceDetailRow(label: "IP Address", value: ip, copyable: true, monospaced: true)

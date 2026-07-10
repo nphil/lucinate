@@ -43,6 +43,10 @@ struct RootView: View {
         .animation(.snappy, value: appState.toast)
         .environment(\.theme, activeTheme)
         .tint(activeTheme.accent)
+        // Propagates via environment to every ScrollView/List in the app,
+        // including presented sheets (the UIKit appearance proxy does not
+        // reach SwiftUI scroll views reliably).
+        .scrollIndicators(.hidden)
         .preferredColorScheme(themeManager.preferredColorScheme)
         .task {
             await appState.bootstrap()

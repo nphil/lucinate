@@ -8,17 +8,19 @@ struct ClientsListView: View {
     @Environment(\.theme) private var theme
 
     var controller: ClientsController
-    var searchText: String
+    @Binding var searchText: String
 
     @State private var expandedIDs: Set<String> = []
     @State private var reserveClient: Client?
     @State private var blockCandidate: Client?
     @State private var showBlockConfirm = false
+    @State private var speeds = ClientSpeedsController()
 
     var body: some View {
         let filtered = controller.filtered(query: searchText)
         ScrollView {
             LazyVStack(spacing: Spacing.sm) {
+                SearchField(text: $searchText, prompt: "Search by name, IP, MAC…")
                 if controller.isLoading {
                     skeletonRows
                 } else if let error = controller.error, controller.clients.isEmpty {
@@ -39,6 +41,7 @@ struct ClientsListView: View {
                         ForEach(filtered) { client in
                             ClientCard(
                                 client: client,
+                                speeds: speeds,
                                 isExpanded: expandedIDs.contains(client.id),
                                 isBlocked: controller.blockedMACs.contains(
                                     client.macAddress.uppercased()),
@@ -57,14 +60,18 @@ struct ClientsListView: View {
             .padding(.top, Spacing.sm)
             .padding(.bottom, Spacing.xxl)
         }
+        .contentMargins(.top, 60, for: .scrollContent)
         .background(theme.background)
         .refreshable {
             Haptics.impact(.medium)
             await reload()
         }
         .task(id: appState.selectedRouterID) {
+            speeds.stop()
             await reload()
+            await startSpeedPolling()
         }
+        .onDisappear { speeds.stop() }
         .sheet(item: $reserveClient) { client in
             NavigationStack {
                 StaticLeasesView(
@@ -92,6 +99,21 @@ struct ClientsListView: View {
 
     private func reload() async {
         await controller.load(service: appState.service, routers: appState.routers)
+    }
+
+    /// Starts live speed polling against the ACTIVE router's wireless
+    /// ifnames. Aggregate-mode clients from other routers simply never get a
+    /// rate published (no badge). Tolerates failures silently.
+    private func startSpeedPolling() async {
+        guard let service = appState.service else { return }
+        guard let json = try? await service.wirelessDevices() else { return }
+        let devices = Set(
+            WirelessNetwork.fromWirelessDevices(json)
+                .map(\.device)
+                .filter { !$0.isEmpty }
+        )
+        guard !devices.isEmpty, !Task.isCancelled else { return }
+        speeds.start(service: service, devices: Array(devices))
     }
 
     private func toggle(_ id: String) {
@@ -225,6 +247,9 @@ private struct ClientCard: View {
     @Environment(\.theme) private var theme
 
     let client: Client
+    /// Held only to hand to ClientSpeedBadge — this view's body never reads
+    /// `speeds.rates`, so the 3s tick re-renders badges alone, not rows.
+    let speeds: ClientSpeedsController
     let isExpanded: Bool
     let isBlocked: Bool
     /// False in aggregate (All Routers) mode — quick actions are hidden there.
@@ -339,6 +364,7 @@ private struct ClientCard: View {
             if isBlocked {
                 blockedChip
             }
+            ClientSpeedBadge(mac: client.macAddress, speeds: speeds)
             connectionChip
             Image(systemName: "chevron.down")
                 .font(.caption.weight(.semibold))
@@ -465,6 +491,48 @@ private struct ClientCard: View {
                 .background(tint.opacity(0.15), in: .capsule)
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Live speed badge
+
+/// The ONLY view that reads `speeds.rates`, so the 3s polling tick
+/// re-renders these tiny badges and nothing else. Renders nothing when no
+/// rate is known for the MAC (wired clients, other routers, or an iwinfo
+/// build without byte counters).
+private struct ClientSpeedBadge: View {
+    let mac: String
+    let speeds: ClientSpeedsController
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        if let rate = speeds.rates[mac.uppercased()] {
+            Text(
+                "↓ \(Self.compact(rate.rxBytesPerSecond)) ↑ \(Self.compact(rate.txBytesPerSecond))"
+            )
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(theme.textSecondary)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, Spacing.sm)
+            .padding(.vertical, Spacing.xs)
+            .background(theme.separator.opacity(0.4), in: .capsule)
+            .contentTransition(.numericText())
+        }
+    }
+
+    /// Compact bits-per-second: "2.1M" / "340K" / "12" (same bit-based
+    /// convention as ThroughputCalculator.formatRate, shortened).
+    private static func compact(_ bytesPerSecond: Double) -> String {
+        let bits = max(0, bytesPerSecond) * 8
+        if bits >= 1_000_000 {
+            return String(format: "%.1fM", bits / 1_000_000)
+        }
+        if bits >= 1_000 {
+            return String(format: "%.0fK", bits / 1_000)
+        }
+        return String(format: "%.0f", bits)
     }
 }
 

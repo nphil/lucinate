@@ -204,7 +204,9 @@ final class TravelmateController {
                     ssid: ap["ssid"].coercedString ?? "",
                     apEnabled: (ap["disabled"].coercedString ?? "0") != "1",
                     channel: channels[dev] ?? "auto",
-                    uplinkLocked: !activeDevice.isEmpty && dev == activeDevice
+                    uplinkLocked: !activeDevice.isEmpty && dev == activeDevice,
+                    encryption: ap["encryption"].coercedString ?? "none",
+                    hidden: (ap["hidden"].coercedString ?? "0") == "1"
                 ))
         }
         return radios
@@ -351,21 +353,37 @@ final class TravelmateController {
         }
     }
 
-    /// Rename a broadcast radio's AP (the SSID your devices join). Using the
-    /// same name on both bands lets clients band-steer automatically; using
-    /// different names lets you pin a device to 2.4 or 5 GHz.
+    /// Update a broadcast radio's AP identity (the network your devices
+    /// join): SSID, optionally the password (nil/empty = keep current), and
+    /// optionally the hidden flag (nil = unchanged). One commit + wifi reload.
+    /// Using the same name on both bands lets clients band-steer
+    /// automatically; different names pin a device to 2.4 or 5 GHz.
     @discardableResult
-    func setBroadcastName(section: String, ssid: String, service: RouterService) async -> Bool {
+    func updateBroadcast(
+        section: String, ssid: String, password: String?, hidden: Bool?,
+        service: RouterService
+    ) async -> Bool {
         let trimmed = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !section.isEmpty else {
             error = "Network name can't be empty."
             return false
         }
+        var values: [String: String] = ["ssid": trimmed]
+        if let password, !password.isEmpty {
+            guard password.count >= 8 else {
+                error = "Wi-Fi password must be at least 8 characters."
+                return false
+            }
+            values["key"] = password
+        }
+        if let hidden {
+            values["hidden"] = hidden ? "1" : "0"
+        }
         isBusy = true
         error = nil
         defer { isBusy = false }
         do {
-            try await service.updateWireless(section: section, values: ["ssid": trimmed])
+            try await service.updateWireless(section: section, values: values)
             await load(service: service)
             return true
         } catch {
