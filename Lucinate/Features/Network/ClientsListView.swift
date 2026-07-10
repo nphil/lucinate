@@ -60,7 +60,7 @@ struct ClientsListView: View {
             .padding(.top, Spacing.sm)
             .padding(.bottom, Spacing.xxl)
         }
-        .contentMargins(.top, 60, for: .scrollContent)
+        .contentMargins(.top, 68, for: .scrollContent)
         .background(theme.background)
         .refreshable {
             Haptics.impact(.medium)
@@ -272,6 +272,9 @@ private struct ClientCard: View {
                     details
                 }
             }
+            // Stale entries (lingering leases) visually recede but stay
+            // listed — an "offline" device may just be asleep.
+            .opacity(client.presence == .offline ? 0.55 : 1)
         }
         .contextMenu {
             if canAct {
@@ -330,8 +333,8 @@ private struct ClientCard: View {
     private var header: some View {
         HStack(spacing: Spacing.sm) {
             StatusDot(
-                color: client.connectionType == .unknown ? theme.warning : theme.success,
-                glows: true
+                color: presenceColor,
+                glows: client.presence == .online
             )
             VStack(alignment: .leading, spacing: 2) {
                 Text(client.hostname)
@@ -365,6 +368,9 @@ private struct ClientCard: View {
                 blockedChip
             }
             ClientSpeedBadge(mac: client.macAddress, speeds: speeds)
+            if client.presence == .offline {
+                offlineChip
+            }
             connectionChip
             Image(systemName: "chevron.down")
                 .font(.caption.weight(.semibold))
@@ -414,6 +420,41 @@ private struct ClientCard: View {
             .background(background, in: .capsule)
     }
 
+    private var presenceColor: Color {
+        switch client.presence {
+        case .online: return theme.success
+        case .idle: return theme.warning
+        case .offline: return theme.separator
+        }
+    }
+
+    private var presenceLabel: String {
+        switch client.presence {
+        case .online: return "Online"
+        case .idle: return "Idle (sleeping)"
+        case .offline: return "Offline"
+        }
+    }
+
+    /// Detail-row text color: the separator token is too faint for text, so
+    /// offline reads as secondary text instead.
+    private var presenceStatusColor: Color {
+        switch client.presence {
+        case .online: return theme.success
+        case .idle: return theme.warning
+        case .offline: return theme.textSecondary
+        }
+    }
+
+    private var offlineChip: some View {
+        Text("Offline")
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(theme.textSecondary)
+            .padding(.horizontal, Spacing.sm)
+            .padding(.vertical, Spacing.xs)
+            .background(theme.separator.opacity(0.5), in: .capsule)
+    }
+
     private var blockedChip: some View {
         Text("Blocked")
             .font(.caption.weight(.medium))
@@ -443,6 +484,11 @@ private struct ClientCard: View {
             }
             Divider()
                 .padding(.vertical, Spacing.xs)
+            ClientDetailRow(
+                label: "Status",
+                value: presenceLabel,
+                valueColor: presenceStatusColor
+            )
             ClientDetailRow(
                 label: "Lease Time Remaining",
                 value: client.formattedLeaseTime,

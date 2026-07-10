@@ -9,6 +9,17 @@ struct Client: Sendable, Identifiable, Equatable {
         case unknown
     }
 
+    /// Display-only liveness derived from assoclist membership and the
+    /// kernel neighbor (ARP/NDP) tables. Never persisted.
+    enum Presence: String, Sendable {
+        /// Associated to Wi-Fi, or a fresh (REACHABLE/DELAY/PROBE) neighbor.
+        case online
+        /// STALE neighbor entry — likely a sleeping device, not a departed one.
+        case idle
+        /// No liveness signal at all (e.g. only a lingering DHCP lease).
+        case offline
+    }
+
     let ipAddress: String
     let macAddress: String
     let hostname: String
@@ -24,6 +35,7 @@ struct Client: Sendable, Identifiable, Equatable {
     let expiresAt: Int?
     let connectionType: ConnectionType
     let ipv6Addresses: [String]
+    let presence: Presence
 
     init(
         ipAddress: String = "N/A",
@@ -37,7 +49,8 @@ struct Client: Sendable, Identifiable, Equatable {
         activeTime: Int? = nil,
         expiresAt: Int? = nil,
         connectionType: ConnectionType = .unknown,
-        ipv6Addresses: [String] = []
+        ipv6Addresses: [String] = [],
+        presence: Presence = .offline
     ) {
         self.ipAddress = ipAddress
         self.macAddress = macAddress
@@ -51,6 +64,7 @@ struct Client: Sendable, Identifiable, Equatable {
         self.expiresAt = expiresAt
         self.connectionType = connectionType
         self.ipv6Addresses = ipv6Addresses
+        self.presence = presence
     }
 
     var id: String { macAddress.uppercased() }
@@ -213,7 +227,8 @@ struct Client: Sendable, Identifiable, Equatable {
             activeTime: activeTime,
             expiresAt: expiresAt,
             connectionType: connectionType,
-            ipv6Addresses: newIPv6
+            ipv6Addresses: newIPv6,
+            presence: presence
         )
     }
 
@@ -231,7 +246,27 @@ struct Client: Sendable, Identifiable, Equatable {
             activeTime: activeTime,
             expiresAt: expiresAt,
             connectionType: connectionType,
-            ipv6Addresses: ipv6Addresses
+            ipv6Addresses: ipv6Addresses,
+            presence: presence
+        )
+    }
+
+    /// Copy helper: same client with a different presence.
+    func with(presence: Presence) -> Client {
+        Client(
+            ipAddress: ipAddress,
+            macAddress: macAddress,
+            hostname: hostname,
+            hostId: hostId,
+            leaseTime: leaseTime,
+            vendor: vendor,
+            dnsName: dnsName,
+            clientId: clientId,
+            activeTime: activeTime,
+            expiresAt: expiresAt,
+            connectionType: connectionType,
+            ipv6Addresses: ipv6Addresses,
+            presence: presence
         )
     }
 
