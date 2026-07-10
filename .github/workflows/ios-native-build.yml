@@ -1,5 +1,9 @@
 name: iOS Native Build
 
+# Fast pre-merge compile gate for feature branches. The release workflow does
+# its own device compile, so this only needs to be a quick "does it build +
+# do the unit tests pass" check.
+
 on:
   push:
     branches:
@@ -16,48 +20,40 @@ concurrency:
   group: native-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Skip brew's slow self-update / cleanup on every run (saves 1-2 min).
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
 jobs:
   build:
     runs-on: macos-26
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Toolchain info
-        run: |
-          xcodebuild -version
-          ls /Applications | grep -i xcode || true
-
       - name: Install XcodeGen
-        run: |
-          command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
-          command -v xcbeautify >/dev/null 2>&1 || brew install xcbeautify
+        run: command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
 
       - name: Generate project
         run: xcodegen generate
 
-      - name: Build (iOS Simulator)
-        run: |
-          set -o pipefail
-          xcodebuild build \
-            -project Lucinate.xcodeproj \
-            -scheme Lucinate \
-            -destination 'generic/platform=iOS Simulator' \
-            CODE_SIGNING_ALLOWED=NO \
-            COMPILER_INDEX_STORE_ENABLE=NO | xcbeautify --renderer github-actions
-
-      - name: Unit tests
+      # One pass: `xcodebuild test` builds then tests — no separate build step.
+      # `-quiet` prints only warnings/errors (faster, still shows failures).
+      - name: Build & test
         run: |
           set -o pipefail
           DEVICE=$(xcrun simctl list devices available | grep -oE 'iPhone [^(]+' | head -1 | xargs)
-          if [ -z "$DEVICE" ]; then
-            echo "No iPhone simulator available; skipping tests"
-            exit 0
+          if [ -n "$DEVICE" ]; then
+            echo "Testing on: $DEVICE"
+            xcodebuild test \
+              -project Lucinate.xcodeproj -scheme Lucinate \
+              -destination "platform=iOS Simulator,name=$DEVICE" \
+              -quiet CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO
+          else
+            echo "No simulator available — compile-only check."
+            xcodebuild build \
+              -project Lucinate.xcodeproj -scheme Lucinate \
+              -destination 'generic/platform=iOS Simulator' \
+              -quiet CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO
           fi
-          echo "Testing on simulator: $DEVICE"
-          xcodebuild test \
-            -project Lucinate.xcodeproj \
-            -scheme Lucinate \
-            -destination "platform=iOS Simulator,name=$DEVICE" \
-            CODE_SIGNING_ALLOWED=NO \
-            COMPILER_INDEX_STORE_ENABLE=NO | xcbeautify --renderer github-actions

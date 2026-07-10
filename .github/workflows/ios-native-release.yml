@@ -11,12 +11,13 @@ name: iOS Native Release (unsigned)
 on:
   push:
     branches: [main]
+    # Only actual app changes cut a release — editing this workflow (or docs)
+    # doesn't mint a no-op version. Use workflow_dispatch to test the pipeline.
     paths:
       - "Lucinate/**"
       - "LucinateTests/**"
       - "project.yml"
       - "Support/**"
-      - ".github/workflows/ios-native-release.yml"
   workflow_dispatch: {}
 
 concurrency:
@@ -26,23 +27,23 @@ concurrency:
 permissions:
   contents: write
 
+env:
+  # Skip brew's slow self-update / cleanup on every run (saves 1-2 min).
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
 jobs:
   release:
     name: Build unsigned native IPA
     runs-on: macos-26
-    timeout-minutes: 45
+    timeout-minutes: 40
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Toolchain info
-        run: xcodebuild -version
-
-      - name: Install tools
-        run: |
-          command -v xcodegen  >/dev/null 2>&1 || brew install xcodegen
-          command -v xcbeautify >/dev/null 2>&1 || brew install xcbeautify
+      - name: Install XcodeGen
+        run: command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
 
       - name: Compute version
         id: ver
@@ -68,13 +69,15 @@ jobs:
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$PWD/build/Lucinate.xcarchive" \
+            -quiet \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
             MARKETING_VERSION=${{ steps.ver.outputs.version }} \
             CURRENT_PROJECT_VERSION=${{ steps.ver.outputs.build }} \
-            COMPILER_INDEX_STORE_ENABLE=NO | xcbeautify --renderer github-actions
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            DEBUG_INFORMATION_FORMAT=dwarf
 
       - name: Package into IPA
         run: |
