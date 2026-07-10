@@ -2,7 +2,7 @@
   "name": "Lucinate Repo",
   "subtitle": "Repository for the Lucinate iOS app",
   "description": "An unofficial AltStore/Feather compatible source for Lucinate \u2014 an OpenWrt router management app for iOS.",
-  "iconURL": "https://raw.githubusercontent.com/nphil/lucinate/main/ios/Runner/Assets.xcassets/AppIcon.appiconset/AppIcon~ios-marketing.png",
+  "iconURL": "https://raw.githubusercontent.com/nphil/lucinate/main/Lucinate/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon1024.png",
   "website": "https://github.com/nphil/lucinate",
   "tintColor": "#2E7DE9",
   "apps": [
@@ -12,7 +12,7 @@
       "developerName": "Nitin",
       "subtitle": "OpenWrt Router Manager",
       "localizedDescription": "Manage your OpenWrt routers from iOS. Monitor clients and throughput, control interfaces and wireless, and manage Tailscale and TravelMate \u2014 all with a fast, themeable UI. Built for life on the move.",
-      "iconURL": "https://raw.githubusercontent.com/nphil/lucinate/main/ios/Runner/Assets.xcassets/AppIcon.appiconset/AppIcon~ios-marketing.png",
+      "iconURL": "https://raw.githubusercontent.com/nphil/lucinate/main/Lucinate/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon1024.png",
       "tintColor": "#2E7DE9",
       "category": "utilities",
       "deviceFamilies": [
