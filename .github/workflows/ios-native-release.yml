@@ -1,21 +1,22 @@
 name: iOS Native Release (unsigned)
 
-# Builds the NATIVE SwiftUI app as an UNSIGNED device .ipa for sideloading
+# Builds the native SwiftUI app as an UNSIGNED device .ipa for sideloading
 # (AltStore / Feather / Sideloadly), publishes a GitHub release, and patches
-# apps.json (the Feather source). This is the successor to the Flutter
-# ios-build.yml pipeline — the native app ships as 2.0.x under the same bundle
-# id (app.cogwheel.lucimobile), so Feather treats it as an in-place update.
+# apps.json (the Feather source). The native app is the shipping iOS app,
+# released as 2.0.x under bundle id app.cogwheel.lucimobile.
 #
-# The build+package steps run on any ref (so the branch can validate the
-# never-before-attempted device archive via workflow_dispatch); the publish
-# and apps.json steps only run on main.
+# The build+package steps run on any ref (so a branch can validate the device
+# archive via workflow_dispatch); publish + apps.json only run on main.
 
 on:
   push:
     branches: [main]
     paths:
-      - 'native/**'
-      - '.github/workflows/ios-native-release.yml'
+      - "Lucinate/**"
+      - "LucinateTests/**"
+      - "project.yml"
+      - "Support/**"
+      - ".github/workflows/ios-native-release.yml"
   workflow_dispatch: {}
 
 concurrency:
@@ -47,9 +48,8 @@ jobs:
         id: ver
         run: |
           set -euo pipefail
-          # MAJOR.MINOR pinned at 2.0 for the native app; patch = run number so
-          # every build is a strictly-increasing semver Feather sees as an
-          # update (mirrors the Flutter pipeline's auto-bump rule).
+          # MAJOR.MINOR pinned at 2.0; patch = run number so every build is a
+          # strictly-increasing semver Feather sees as an update.
           VERSION="2.0.${{ github.run_number }}"
           echo "version=$VERSION"                >> "$GITHUB_OUTPUT"
           echo "build=${{ github.run_number }}"  >> "$GITHUB_OUTPUT"
@@ -57,11 +57,9 @@ jobs:
           echo "Building Lucinate (native) v$VERSION"
 
       - name: Generate project
-        working-directory: native
         run: xcodegen generate
 
       - name: Archive (unsigned, generic iOS device)
-        working-directory: native
         run: |
           set -o pipefail
           xcodebuild archive \
@@ -79,7 +77,6 @@ jobs:
             COMPILER_INDEX_STORE_ENABLE=NO | xcbeautify --renderer github-actions
 
       - name: Package into IPA
-        working-directory: native
         run: |
           set -euo pipefail
           APP_PATH="build/Lucinate.xcarchive/Products/Applications/Lucinate.app"
@@ -88,7 +85,6 @@ jobs:
             find build -maxdepth 4 -name '*.app' 2>/dev/null || true
             exit 1
           fi
-          # Completeness gate: a failed link can leave a shell .app.
           EXE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist" 2>/dev/null || echo Lucinate)
           if [ ! -s "$APP_PATH/$EXE" ]; then
             echo "❌ App executable '$EXE' missing/empty — build failed."
@@ -104,7 +100,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: lucinate-native-ipa
-          path: native/lucinate.ipa
+          path: lucinate.ipa
           if-no-files-found: error
 
       - name: Publish release
@@ -118,7 +114,7 @@ jobs:
             Built from `${{ github.sha }}`.
 
             Feather source: https://raw.githubusercontent.com/nphil/lucinate/main/apps.json
-          files: native/lucinate.ipa
+          files: lucinate.ipa
 
       # Patch apps.json in-job: releases created by GITHUB_TOKEN do NOT fire the
       # `release: published` event, so a release-triggered workflow never runs.
@@ -131,7 +127,7 @@ jobs:
           SHA:     ${{ github.sha }}
         run: |
           set -euo pipefail
-          SIZE=$(wc -c < native/lucinate.ipa | tr -d ' ')
+          SIZE=$(wc -c < lucinate.ipa | tr -d ' ')
           DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           URL="https://github.com/nphil/lucinate/releases/download/${TAG}/lucinate.ipa"
           NOTES="Native SwiftUI rewrite (2.0). Unsigned IPA — sideload with Feather/AltStore. Built from \`${SHA:0:7}\`."

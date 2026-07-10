@@ -1,142 +1,108 @@
-# LuCI Mobile
+# Lucinate
 
-<div align="center">
-  <a href="https://play.google.com/store/apps/details?id=com.cogwheel.LuCIMobile">
-    <img src="store-badges/google.webp" alt="Get it on Google Play" style="height:56px;"/>
-  </a>
-  <a href="https://apps.apple.com/app/luci-mobile/id6749455847">
-    <img src="store-badges/apple.webp" alt="Download on the App Store" style="height:56px;"/>
-  </a>
-  <a href="https://apt.izzysoft.de/fdroid/index/apk/com.cogwheel.LuCIMobile">
-    <img src="store-badges/izzyondroid.webp" alt="Get it on IzzyOnDroid" style="height:56px;"/>
-  </a>
-  <br><br>
+A native **Swift 6 / SwiftUI** OpenWrt router manager, targeting **iOS 26** with
+Liquid Glass navigation. The app is the repo root. (This replaced an earlier
+Flutter app, which was removed — its history remains in git and in the
+`ios-v1.1.x` release tags.)
 
-![Latest Release](https://shields.rbtlog.dev/simple/com.cogwheel.LuCIMobile)
-![GitHub all downloads](https://img.shields.io/github/downloads/cogwheel0/luci-mobile/total?style=flat-square&label=Downloads&logo=github&color=0A84FF)
-
-<img src="fastlane/metadata/android/en-US/images/phoneScreenshots/flutter_01.png" width="300"/>
-</div>
-
-<br>
-
-**LuCI Mobile** is a modern Flutter app for managing and monitoring multiple OpenWrt/LuCI routers. It features a beautiful Material 3 UI, secure authentication, real-time stats, and seamless multi-router support.
-
----
-
-## Features
-
-- **Multiple Router Management:** Add, switch, and manage any number of OpenWrt routers. Each router’s data is kept separate and secure.
-- **Secure Login:** HTTP/HTTPS support, self-signed certificate handling, and secure credential storage.
-- **Dashboard Overview:** Real-time system stats, interface status, connected clients, and interactive charts.
-- **Network Interface Management:** View and monitor all wired and wireless interfaces, bandwidth, IPs, and DNS.
-- **Client Management:** See all connected devices, connection type, MAC/IP, vendor, DHCP lease, and more.
-- **System Control:** Remote reboot, settings, and theme customization (light/dark mode).
-- **Modern UI/UX:** Material Design 3, responsive layout, and intuitive navigation.
-- **Open Source:** GPLv3 licensed and available on [Google Play](https://play.google.com/store/apps/details?id=com.cogwheel.LuCIMobile) and [IzzyOnDroid](https://apt.izzysoft.de/fdroid/index/apk/com.cogwheel.LuCIMobile).
-
----
-
-## Multiple Router Functionality
-
-- **Add Unlimited Routers:** Each with its own credentials and settings.
-- **Quick Switch:** Instantly switch routers from the dashboard dropdown or "Manage Routers" screen.
-- **Isolated Data:** Each router’s dashboard, clients, and settings are kept separate.
-- **Edit & Remove:** Update credentials, rename, or remove routers at any time.
-- **Auto-Connect:** Remembers your last selected router and auto-connects on launch.
-- **Secure Storage:** All credentials are stored securely on your device.
-
----
-
-## Screenshots
-
-| Login | Dashboard | Clients | Interfaces |
-|-------|-----------|---------|------------|
-| <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/flutter_02.png" width="200"/> | <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/flutter_01.png" width="200"/> | <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/flutter_03.png" width="200"/> | <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/flutter_05.png" width="200"/> |
-
----
-
-## Installation
-
-**Get it on [Google Play](https://play.google.com/store/apps/details?id=com.cogwheel.LuCIMobile)**, **[Apple App Store](https://apps.apple.com/app/luci-mobile/id6749455847)**, or **[IzzyOnDroid](https://apt.izzysoft.de/fdroid/index/apk/com.cogwheel.LuCIMobile)**, or build from source:
+## Open & build
 
 ```bash
-git clone https://github.com/cogwheel0/luci-mobile.git
-cd luci-mobile
-flutter pub get
-flutter run
+xcodegen generate        # brew install xcodegen (project is generated, never committed)
+open Lucinate.xcodeproj  # scheme: Lucinate
 ```
 
-- Requires Flutter 3.32.5+ and Dart 3.8+
-- Android: `flutter build apk`  
-- iOS: `flutter build ios`
+CI (`.github/workflows/ios-native-build.yml`) runs on every push to
+`claude/native-swift-rewrite*` branches: `macos-26` runner (Xcode 26 / iOS 26
+SDK), `xcodegen generate`, simulator build, then unit tests on the first
+available iPhone simulator. That workflow is the compile gate for this code —
+it was developed on a Linux container with no Swift toolchain.
 
-### Sideload on iOS (Feather / AltStore)
+## Decisions
 
-Add this source in [Feather](https://github.com/khcrysalis/Feather) or AltStore to get
-unsigned builds and over-the-air updates:
+- **Bundle id: `app.cogwheel.lucimobile` (reused).** Feather treats the native
+  build as an in-place update of the Flutter app. Change
+  `PRODUCT_BUNDLE_IDENTIFIER` in `project.yml` if you want side-by-side installs.
+- **Branch:** the plan named `claude/native-swift-rewrite`, but this session's
+  push access is scoped to `claude/native-swift-rewrite-q5dnyg`, so everything
+  lives there (the CI trigger covers both via `claude/native-swift-rewrite*`).
+- **Networking = LuCI JSON-RPC bridge (parity contract).** Same transport the
+  Flutter app proved out: form login to `/cgi-bin/luci/` → `sysauth` cookie →
+  JSON-RPC to `/cgi-bin/luci/admin/ubus`. Kept because it works on a stock LuCI
+  install with no extra packages. Native improvements: `URLSession` async/await,
+  an actor-based 3-permit semaphore for uhttpd's tiny CGI process cap,
+  transient-error retry with backoff, TOFU self-signed-TLS handling via a
+  `URLSessionDelegate` with Keychain persistence, and cookie capture through the
+  session jar (robust across redirects). A future option is the native
+  `/ubus` endpoint (`uhttpd-mod-ubus` + `session.login`), which would drop the
+  cookie dance — not used because it requires extra router-side setup.
+- **No third-party dependencies.** Foundation/SwiftUI/Charts/Security only.
+- **Themes are hand-authored tokens** (not seed-generated): 10 dark + 10 light
+  palettes that reskin background/surfaces/text/separators/semantic colors and
+  the chart series (RX = `success`, TX = `info`).
+
+## Status by phase
+
+| Phase | Scope | Status |
+|---|---|---|
+| 0 | Scaffold, XcodeGen project, CI gate | ✅ green |
+| 1 | Networking core, models, themes, design system, unit tests | ✅ green |
+| 2 | App shell: splash/login/reviewer mode, 4-tab glass nav, Connection pill, hostname menu, Settings, Manage Routers, mock client | ✅ green |
+| 3 | Parity: Home dashboard (vitals, live chart), Network hub (Clients + Interfaces + WireGuard), TravelMate (full), Tailscale (full), dashboard prefs, reboot flow | ✅ green |
+| 4 | Tier A: Control Center quick toggles, Wi-Fi AP editor, DHCP static leases, client actions (Reserve IP / WoL / block) | ✅ green |
+| 5 | Tier B: port forwards + firewall rule toggles, system/kernel log viewer, ping diagnostic | ✅ green |
+| 6 | Polish pass + this README | ✅ |
+
+### Not done (Tier C / known gaps)
+
+- Throughput Live Activity / home-screen widget (Tier C) — skipped.
+- Per-client bandwidth (nlbwmon) and opkg update check (Tier C) — skipped.
+- Global search across tabs (bonus in the plan) — per-list `.searchable` only.
+- Landscape gets scrolling layouts rather than a bespoke Home arrangement.
+- Client actions (WoL/block/reserve) are hidden in All-Routers aggregate mode
+  by design — they act on the active router only.
+
+## What to test on-device
+
+1. **Login** against a real router (http, https with self-signed cert → the
+   Accept Risk flow, `host:port` forms). Auto-relogin after backgrounding.
+2. **Reviewer mode**: 5-second long-press on the login brand → type `REVIEWER`.
+   Whole app runs on mock data.
+3. **Home**: live throughput chart (2s cadence), vitals, cards jump to the
+   right tab. Customize Dashboard prefs persist per router.
+4. **Clients**: All Routers vs This Router toggle, expand, copy fields,
+   Reserve IP / Wake on LAN / Block internet on the active router.
+5. **TravelMate**: scan + add uplink, forget (swipe), broadcast band 2.4/5/Both,
+   channel picker suggestions, captive-portal banner.
+6. **Tailscale**: exit-node switch, MagicDNS/Shields-Up confirms (danger copy),
+   peers list. Full `form_data` writes — verify no flags get cleared.
+7. **Reboot** from the hostname menu / Control Center: lockout overlay +
+   auto-reconnect when the router returns.
+8. **Themes**: all 20 palettes reskin every screen incl. chart colors;
+   System/Light/Dark mode switching.
+
+## Layout
 
 ```
-https://raw.githubusercontent.com/nphil/lucinate/main/apps.json
+  project.yml           XcodeGen spec (Swift 6, iOS 26, unsigned CI builds)
+  Icon/                 SVG icon source + generator (light/dark/tinted PNGs)
+  Support/Info.plist    ATS allows LAN http; local-network usage string
+  Lucinate/
+    App/                LucinateApp, AppState, RootView, MainTabView, Splash, Login
+    Networking/         JSONValue, RouterEndpoint, UbusClient (actor), RouterService,
+                        ThroughputCalculator, KeychainStore, AsyncSemaphore, MockUbusClient
+    Models/             Router, Client, NetworkInterface(+WireGuardPeer), WirelessNetwork,
+                        Tailscale*, Travelmate*, DashboardPreferences
+    Theme/              Theme tokens, 20 palettes, ThemeManager, environment key
+    DesignSystem/       Spacing, Typography, Card, Haptics, StatusDot, Skeleton,
+                        state views, glass helpers, formatters
+    Features/
+      Home/             Dashboard + throughput chart + dashboard prefs
+      Network/          Clients, Interfaces, Wi-Fi editor, Static Leases, Firewall
+      TravelMate/       Controller + screens (scan, channel picker)
+      Tailscale/        Controller + screen
+      ControlCenter/    Connection pill accessory + quick-controls sheet
+      Diagnostics/      Log viewer (logread/dmesg) + ping
+      Settings/         Settings sheet, theme pickers, Manage Routers, About
+  LucinateTests/        RPC envelope/URL/throughput/theme-catalog tests
 ```
-
-Every push to `main` builds a fresh unsigned IPA, publishes a release, and updates the
-source automatically — so Feather shows an update whenever the app changes.
-
----
-
-## Project Structure
-
-```
-lib/
-├── config/                 # App configuration
-├── models/                 # Data models (client, interface, router)
-├── screens/                # UI screens (dashboard, clients, interfaces, login, more, etc.)
-├── services/               # Business logic (API, secure storage)
-├── state/                  # State management (app_state.dart)
-├── widgets/                # Reusable UI components (luci_app_bar.dart)
-└── main.dart               # App entry point
-```
-
----
-
-## Development & Contribution
-
-- Run in dev mode: `flutter run`
-- Build for release: `flutter build apk --release` or `flutter build ios --release`
-- Analyze code: `flutter analyze`
-
-**Contributions welcome!** Please fork, branch, and submit a pull request.
-
----
-
-## Security & Privacy
-- All credentials are stored securely on-device
-- HTTPS and self-signed certificate support
-- No analytics or tracking
-
----
-
-## Troubleshooting
-
-- **Connection Failed:** Check router IP, LuCI web interface, firewall, and try both HTTP/HTTPS.
-- **Authentication Failed:** Verify credentials and admin privileges.
-- **No Data Displayed:** Ensure the router has LuCI RPC support: `opkg update && opkg install luci-mod-rpc rpcd-mod-luci rpcd-mod-iwinfo luci-mod-status`, restart `rpcd` (or reboot), then verify with `ubus list luci-rpc` and `ubus call luci-rpc getNetworkDevices '{}'`.
-
----
-
-## License
-
-GPL v3.0. See [LICENSE](LICENSE).
-
----
-
-## Acknowledgments
-- OpenWrt community for LuCI
-- Flutter team
-- [OpenWrtManager](https://github.com/hagaygo/OpenWrtManager) inspiration
-- Contributors and testers
-
----
-
-**Note:** This app requires an OpenWrt router with LuCI web interface enabled. Make sure your router is properly configured before use.
