@@ -3,6 +3,7 @@ import SwiftUI
 /// App info screen: mark, version, blurb, repository link, license.
 struct AboutView: View {
     @Environment(\.theme) private var theme
+    @Environment(AppState.self) private var appState
 
     private var versionString: String {
         let info = Bundle.main.infoDictionary
@@ -58,6 +59,8 @@ struct AboutView: View {
                 Text("MIT License")
                     .font(.caption)
                     .foregroundStyle(theme.textSecondary)
+
+                routerDetailsCard
             }
             .frame(maxWidth: .infinity)
             .padding(.top, Spacing.xxl)
@@ -67,5 +70,46 @@ struct AboutView: View {
         .background(theme.background)
         .navigationTitle("About")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    // MARK: - Router details
+
+    /// Model/firmware info, shown only when board info is available.
+    @ViewBuilder
+    private var routerDetailsCard: some View {
+        let board = appState.boardInfo
+        let candidates: [(label: String, value: String?)] = [
+            ("Model", board["model"].stringValue),
+            ("Firmware", board["release"]["description"].stringValue),
+            ("Kernel", board["kernel"].stringValue),
+            ("Board", board["board_name"].stringValue),
+        ]
+        let rows: [(label: String, value: String)] = candidates.compactMap { candidate in
+            guard let value = candidate.value, !value.isEmpty else { return nil }
+            return (candidate.label, value)
+        }
+
+        if rows.isEmpty {
+            EmptyView()
+        } else {
+            Card {
+                VStack(alignment: .leading, spacing: Spacing.sm) {
+                    Text("ROUTER")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(theme.textSecondary)
+                    ForEach(rows, id: \.label) { row in
+                        HStack {
+                            Text(row.label)
+                                .foregroundStyle(theme.textSecondary)
+                            Spacer()
+                            Text(row.value)
+                                .foregroundStyle(theme.textPrimary)
+                                .multilineTextAlignment(.trailing)
+                        }
+                        .font(.subheadline)
+                    }
+                }
+            }
+        }
     }
 }

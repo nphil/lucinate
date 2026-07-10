@@ -23,6 +23,11 @@ final class DashboardController {
         !systemInfo.isNull || !wireless.isEmpty || !interfaces.isEmpty
     }
 
+    /// SSID of the active repeated uplink (the STA interface), if any.
+    var uplinkSSID: String? {
+        wireless.first { $0.mode == "sta" && !$0.ssid.isEmpty }?.ssid
+    }
+
     // MARK: - Loading
 
     func load(service: RouterService) async {

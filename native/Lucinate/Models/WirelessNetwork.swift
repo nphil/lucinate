@@ -52,6 +52,24 @@ struct WirelessNetwork: Sendable, Identifiable, Equatable {
         self.encryption = encryption
     }
 
+    /// "2.4 GHz" / "5 GHz" / "6 GHz" / "" — from `band`, else a channel heuristic.
+    var bandLabel: String {
+        switch band {
+        case "2g": return "2.4 GHz"
+        case "5g": return "5 GHz"
+        case "6g": return "6 GHz"
+        default:
+            if let channel { return channel > 14 ? "5 GHz" : "2.4 GHz" }
+            return ""
+        }
+    }
+
+    /// A STA interface repeats an upstream network; an AP is one the router broadcasts.
+    var isUplink: Bool { mode == "sta" }
+
+    /// "Broadcast" (AP the router transmits) or "Uplink" (STA it repeats).
+    var roleLabel: String { isUplink ? "Uplink" : "Broadcast" }
+
     /// Parses the full luci-rpc `getWirelessDevices` payload: an object keyed
     /// by radio name ("radio0", ...), each with a `config` object and an
     /// `interfaces[]` array (entries carrying `ifname`, `section`, `config`

@@ -48,6 +48,43 @@ final class TravelmateController {
         return label.isEmpty ? device : label
     }
 
+    /// The single saved uplink that is actually connected right now. When
+    /// several saved uplinks share the active SSID (common in hotels where
+    /// every AP has the same name), this disambiguates by the connected radio
+    /// so only one row is flagged "Active" — never all of them.
+    var activeUplinkId: String? {
+        guard status.isConnected, !status.activeSsid.isEmpty else { return nil }
+        let matches = uplinks.filter { $0.ssid == status.activeSsid }
+        guard !matches.isEmpty else { return nil }
+        if !status.activeDevice.isEmpty,
+            let exact = matches.first(where: { $0.device == status.activeDevice })
+        {
+            return exact.sectionId
+        }
+        return matches.first?.sectionId
+    }
+
+    /// Saved uplinks that duplicate another (same SSID + same band). The
+    /// connected one (or, if none, the first) is treated as canonical; the
+    /// rest are flagged so the user can forget the redundant copies.
+    var duplicateUplinkIds: Set<String> {
+        let canonicalActive = activeUplinkId
+        var groups: [String: [TravelmateUplink]] = [:]
+        for uplink in uplinks {
+            let band = radioBands[uplink.device] ?? 0
+            groups["\(uplink.ssid.lowercased())|\(band)", default: []].append(uplink)
+        }
+        var duplicates: Set<String> = []
+        for (_, group) in groups where group.count > 1 {
+            let canonical =
+                group.first { $0.sectionId == canonicalActive } ?? group.first
+            for uplink in group where uplink.sectionId != canonical?.sectionId {
+                duplicates.insert(uplink.sectionId)
+            }
+        }
+        return duplicates
+    }
+
     // MARK: - Load
 
     func load(service: RouterService) async {
@@ -203,39 +240,43 @@ final class TravelmateController {
 
     // MARK: - Scan
 
-    /// Scan both radios for nearby networks and merge, keeping the strongest
-    /// signal per SSID+band (2.4 and 5 GHz of the same network stay distinct —
-    /// the band choice matters for a travel uplink).
+    /// Scan both radios for nearby networks, keeping the strongest signal per
+    /// SSID+band (2.4 and 5 GHz of the same network stay distinct — the band
+    /// choice matters for a travel uplink).
+    ///
+    /// Both radios are scanned in parallel (halves the wait), but each radio's
+    /// results are published to `scanResults` the moment that radio finishes —
+    /// so the list grows live instead of appearing all at once after an
+    /// opaque spinner. One radio failing (e.g. busy) doesn't abort the scan.
     func scan(service: RouterService) async {
         isScanning = true
         error = nil
+        scanResults = []
         defer { isScanning = false }
 
-        // Scan both radios in parallel — halves the wait; one radio failing
-        // (e.g. busy) shouldn't abort the whole scan.
-        async let radio0Entries = tolerantScan(service, radio: "radio0")
-        async let radio1Entries = tolerantScan(service, radio: "radio1")
-        let perRadio: [(String, [JSONValue])] = [
-            ("radio0", await radio0Entries),
-            ("radio1", await radio1Entries),
-        ]
-
         var byNameBand: [String: WifiScanResult] = [:]
-        for (radio, entries) in perRadio {
-            for entry in entries {
-                let scan = WifiScanResult.fromIwinfo(entry, device: radio)
-                if scan.ssid.isEmpty { continue }  // skip hidden networks
-                // Skip networks too weak to repeat reliably (0 == unknown, keep it).
-                if scan.signal != 0 && scan.signal < minSignalDbm { continue }
-                let key = "\(scan.ssid) \(scan.band)"
-                if let existing = byNameBand[key], existing.signal >= scan.signal {
-                    continue
+
+        await withTaskGroup(of: (String, [JSONValue]).self) { group in
+            for radio in ["radio0", "radio1"] {
+                group.addTask { (radio, await tolerantScan(service, radio: radio)) }
+            }
+            for await (radio, entries) in group {
+                for entry in entries {
+                    let scan = WifiScanResult.fromIwinfo(entry, device: radio)
+                    if scan.ssid.isEmpty { continue }  // skip hidden networks
+                    // Skip networks too weak to repeat reliably (0 == unknown).
+                    if scan.signal != 0 && scan.signal < minSignalDbm { continue }
+                    let key = "\(scan.ssid) \(scan.band)"
+                    if let existing = byNameBand[key], existing.signal >= scan.signal {
+                        continue
+                    }
+                    byNameBand[key] = scan
                 }
-                byNameBand[key] = scan
+                // Publish after each radio completes → live-growing list,
+                // strongest networks first.
+                scanResults = byNameBand.values.sorted { $0.signal > $1.signal }
             }
         }
-        // Strongest networks first, so the best uplinks surface at the top.
-        scanResults = byNameBand.values.sorted { $0.signal > $1.signal }
     }
 
     // MARK: - Uplinks
@@ -302,6 +343,29 @@ final class TravelmateController {
             }
             try await service.uciCommit(config: "wireless")
             try await service.wifiReload()
+            await load(service: service)
+            return true
+        } catch {
+            self.error = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Rename a broadcast radio's AP (the SSID your devices join). Using the
+    /// same name on both bands lets clients band-steer automatically; using
+    /// different names lets you pin a device to 2.4 or 5 GHz.
+    @discardableResult
+    func setBroadcastName(section: String, ssid: String, service: RouterService) async -> Bool {
+        let trimmed = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !section.isEmpty else {
+            error = "Network name can't be empty."
+            return false
+        }
+        isBusy = true
+        error = nil
+        defer { isBusy = false }
+        do {
+            try await service.updateWireless(section: section, values: ["ssid": trimmed])
             await load(service: service)
             return true
         } catch {

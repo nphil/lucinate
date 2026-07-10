@@ -59,7 +59,7 @@ struct HomeView: View {
                 Task { await reload() }
             }
         } else {
-            deviceInfoCard
+            hostnameHero
             // Isolated in its own view so the 2s throughput tick only
             // re-renders the hero, not the whole dashboard body.
             ThroughputHeroCard(prefs: controller.prefs)
@@ -97,29 +97,39 @@ struct HomeView: View {
     // MARK: - Device info
 
     @ViewBuilder
-    private var deviceInfoCard: some View {
-        let board = appState.boardInfo
+    private var hostnameHero: some View {
         let channel = releaseChannel
+        let connected = appState.service != nil || appState.isReviewerMode
         Card {
-            VStack(alignment: .leading, spacing: Spacing.sm) {
-                HStack(alignment: .top, spacing: Spacing.sm) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(board["model"].stringValue ?? "OpenWrt Router")
-                            .font(.cardTitle)
-                            .foregroundStyle(theme.textPrimary)
-                        Text(appState.hostname)
-                            .font(.subheadline)
-                            .foregroundStyle(theme.textSecondary)
-                    }
-                    Spacer(minLength: Spacing.sm)
-                    chip(channel.label, color: channel.color)
-                }
-                if let description = board["release"]["description"].stringValue {
-                    Text(description)
-                        .font(.footnote)
+            VStack(spacing: Spacing.xs) {
+                Text(appState.hostname)
+                    .font(.title.weight(.bold))
+                    .foregroundStyle(theme.textPrimary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.7)
+                HStack(spacing: Spacing.xs) {
+                    StatusDot(color: connected ? theme.success : theme.error, size: 8)
+                    Text(connected ? "Connected" : "Disconnected")
+                        .font(.subheadline)
                         .foregroundStyle(theme.textSecondary)
+                    Text("·")
+                        .foregroundStyle(theme.textSecondary)
+                    Text(channel.label)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(channel.color)
+                        .padding(.horizontal, Spacing.sm)
+                        .padding(.vertical, 2)
+                        .background(channel.color.opacity(0.15), in: .capsule)
+                }
+                if let uplink = controller.uplinkSSID {
+                    Text("Repeating \(uplink)")
+                        .font(.caption)
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
                 }
             }
+            .frame(maxWidth: .infinity)
         }
     }
 
@@ -202,14 +212,14 @@ struct HomeView: View {
             appState.openInterface(named: network.device)
         } label: {
             HStack(spacing: Spacing.sm) {
-                Image(systemName: "wifi")
+                Image(systemName: network.isUplink ? "antenna.radiowaves.left.and.right" : "wifi")
                     .foregroundStyle(network.disabled ? theme.textSecondary : theme.accent)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(network.ssid)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(theme.textPrimary)
                         .lineLimit(1)
-                    Text(network.device.isEmpty ? network.radio : network.device)
+                    Text(network.bandLabel.isEmpty ? network.roleLabel : "\(network.roleLabel) · \(network.bandLabel)")
                         .font(.caption)
                         .foregroundStyle(theme.textSecondary)
                         .lineLimit(1)
