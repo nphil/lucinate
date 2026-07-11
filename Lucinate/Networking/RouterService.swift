@@ -142,6 +142,75 @@ struct RouterService: Sendable {
             ]))
     }
 
+    /// `file exec` with a long, non-retried timeout for slow commands.
+    func fileExecLong(command: String, params: [String], timeout: TimeInterval) async throws
+        -> JSONValue
+    {
+        try await transport.callLong(
+            "file", "exec",
+            .object([
+                "command": .string(command),
+                "params": .array(params.map { .string($0) }),
+            ]),
+            timeout: timeout)
+    }
+
+    // MARK: - Software updates (apk)
+
+    /// Result of a package-manager command.
+    struct ExecResult: Sendable {
+        let stdout: String
+        let stderr: String
+        let code: Int
+
+        var combinedOutput: String {
+            [stdout, stderr]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+        }
+        var succeeded: Bool { code == 0 }
+    }
+
+    private static func execResult(_ json: JSONValue) -> ExecResult {
+        ExecResult(
+            stdout: json["stdout"].stringValue ?? "",
+            stderr: json["stderr"].stringValue ?? "",
+            code: json["code"].intValue ?? 0)
+    }
+
+    /// apk-tools binary on modern (apk-based) OpenWrt.
+    private static let apkPath = "/usr/bin/apk"
+
+    /// Whether apk is present AND rpcd's ACL permits executing it (running
+    /// `apk --version` tests both — if either fails the feature is unavailable).
+    func apkAvailable() async -> Bool {
+        guard
+            let json = try? await fileExecLong(
+                command: Self.apkPath, params: ["--version"], timeout: 15)
+        else { return false }
+        return (json["code"].intValue ?? 1) == 0
+    }
+
+    /// `apk update` — refresh the package index. Non-mutating but can be slow.
+    func apkUpdate() async throws -> ExecResult {
+        Self.execResult(
+            try await fileExecLong(command: Self.apkPath, params: ["update"], timeout: 60))
+    }
+
+    /// `apk upgrade --simulate` — preview upgradable packages, no changes made.
+    func apkUpgradePreview() async throws -> ExecResult {
+        Self.execResult(
+            try await fileExecLong(
+                command: Self.apkPath, params: ["upgrade", "--simulate"], timeout: 60))
+    }
+
+    /// `apk upgrade` — perform the upgrade. Long-running, mutating, NOT retried.
+    func apkUpgrade() async throws -> ExecResult {
+        Self.execResult(
+            try await fileExecLong(command: Self.apkPath, params: ["upgrade"], timeout: 240))
+    }
+
     /// Kernel neighbor tables (ARP/NDP). LuCI's ACL grants exactly these
     /// command lines — do not alter the argument forms.
     func ipNeighbors() async throws -> String {
