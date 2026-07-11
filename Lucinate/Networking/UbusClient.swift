@@ -104,6 +104,19 @@ final class TOFUTrustDelegate: NSObject, URLSessionDelegate, @unchecked Sendable
 
 protocol UbusCalling: Sendable {
     func call(_ object: String, _ procedure: String, _ params: JSONValue) async throws -> JSONValue
+    /// Single-attempt, long-timeout call for slow mutating commands. Defaults
+    /// to a plain `call` (the mock ignores the timeout).
+    func callLong(
+        _ object: String, _ procedure: String, _ params: JSONValue, timeout: TimeInterval
+    ) async throws -> JSONValue
+}
+
+extension UbusCalling {
+    func callLong(
+        _ object: String, _ procedure: String, _ params: JSONValue, timeout: TimeInterval
+    ) async throws -> JSONValue {
+        try await call(object, procedure, params)
+    }
 }
 
 // MARK: - UbusClient
@@ -127,7 +140,10 @@ actor UbusClient: UbusCalling {
     private static func makeSession(delegate: TOFUTrustDelegate) -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 15
-        config.timeoutIntervalForResource = 60
+        // Ceiling for the whole request. Normal calls still hit their 15s
+        // per-request timeout first; only long package operations (which set a
+        // larger per-request timeout) use the extra headroom.
+        config.timeoutIntervalForResource = 300
         config.httpCookieAcceptPolicy = .always
         config.httpShouldSetCookies = true
         config.waitsForConnectivity = false
@@ -283,6 +299,20 @@ actor UbusClient: UbusCalling {
         try await rawCall(sessionID: "", object: object, procedure: procedure, params: .object([:]))
     }
 
+    /// A single-attempt call with a long timeout, for slow **mutating**
+    /// commands (e.g. `apk upgrade`) where the transient-retry loop must NOT
+    /// re-issue the command. Still honors the 3-concurrent gate.
+    func callLong(
+        _ object: String, _ procedure: String, _ params: JSONValue, timeout: TimeInterval
+    ) async throws -> JSONValue {
+        guard let token else { throw UbusError.notLoggedIn }
+        return try await semaphore.run { [endpoint, session] in
+            try await Self.executeRPC(
+                session: session, endpoint: endpoint, sessionID: token,
+                object: object, procedure: procedure, params: params, timeout: timeout)
+        }
+    }
+
     private func rawCall(
         sessionID: String, object: String, procedure: String, params: JSONValue
     ) async throws -> JSONValue {
@@ -312,7 +342,7 @@ actor UbusClient: UbusCalling {
 
     private static func executeRPC(
         session: URLSession, endpoint: RouterEndpoint, sessionID: String,
-        object: String, procedure: String, params: JSONValue
+        object: String, procedure: String, params: JSONValue, timeout: TimeInterval = 15
     ) async throws -> JSONValue {
         guard let url = URL(string: "\(endpoint.baseURLString)/cgi-bin/luci/admin/ubus") else {
             throw UbusError.invalidResponse
@@ -320,7 +350,7 @@ actor UbusClient: UbusCalling {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 15
+        request.timeoutInterval = timeout
 
         let envelope: JSONValue = .object([
             "jsonrpc": .string("2.0"),

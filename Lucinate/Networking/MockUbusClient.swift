@@ -123,7 +123,9 @@ actor MockUbusClient: UbusCalling {
         case "file.read":
             return fileRead(path: params["path"].stringValue ?? "")
         case "file.exec":
-            return .object(["stdout": .string(""), "stderr": .string(""), "code": .number(0)])
+            return fileExec(
+                command: params["command"].stringValue ?? "",
+                args: params["params"].arrayValue?.compactMap { $0.stringValue } ?? [])
 
         case "luci.wireguard.getWgInstances":
             return Self.wireGuardInstances(now: Int(Date().timeIntervalSince1970))
@@ -598,6 +600,36 @@ actor MockUbusClient: UbusCalling {
             return .object(["data": .string(Self.travelmateRuntime)])
         }
         return .object(["data": .string("")])
+    }
+
+    private func fileExec(command: String, args: [String]) -> JSONValue {
+        func ok(_ out: String) -> JSONValue {
+            .object(["stdout": .string(out), "stderr": .string(""), "code": .number(0)])
+        }
+        if command.hasSuffix("/apk") {
+            switch args.first {
+            case "--version":
+                return ok("apk-tools 3.0.0")
+            case "update":
+                return ok("fetch https://downloads.openwrt.org/.../packages\nUpdated 4 repositories, 3421 packages available")
+            case "upgrade" where args.contains("--simulate"):
+                return ok(
+                    "(1/3) Upgrading luci-base (25.1.1 -> 25.1.2)\n"
+                        + "(2/3) Upgrading libustream-mbedtls (2025.01.20 -> 2025.06.02)\n"
+                        + "(3/3) Upgrading dnsmasq-full (2.90-3 -> 2.91-1)\n"
+                        + "OK: 3 packages would be upgraded")
+            case "upgrade":
+                return ok(
+                    "(1/3) Upgrading luci-base (25.1.1 -> 25.1.2)\n"
+                        + "(2/3) Upgrading libustream-mbedtls (2025.01.20 -> 2025.06.02)\n"
+                        + "(3/3) Upgrading dnsmasq-full (2.90-3 -> 2.91-1)\n"
+                        + "Executing dnsmasq-full-2.91-1.post-install\n"
+                        + "OK: 3 packages upgraded")
+            default:
+                return ok("")
+            }
+        }
+        return .object(["stdout": .string(""), "stderr": .string(""), "code": .number(0)])
     }
 
     // MARK: - wireguard

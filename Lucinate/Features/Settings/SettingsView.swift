@@ -83,6 +83,15 @@ struct SettingsView: View {
                     .listRowBackground(theme.surface)
                 }
 
+                Section("System") {
+                    NavigationLink {
+                        SoftwareUpdatesView()
+                    } label: {
+                        Label("Software Updates", systemImage: "arrow.down.circle")
+                    }
+                    .listRowBackground(theme.surface)
+                }
+
                 Section("Routers") {
                     NavigationLink("Manage Routers") {
                         ManageRoutersView()
