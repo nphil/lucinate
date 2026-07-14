@@ -60,3 +60,51 @@ Token-efficient method (learned the hard way):
   background subagent for the quick green/red verification.
 - For a broken build, pull failing job logs with `get_job_logs`
   (`failed_only`, `tail_lines`) so large log output stays out of context.
+
+## Session handoff (2026-07-14) — moving from cloud to LOCAL
+
+Work so far was done in a headless Linux **cloud** container. It's now
+continuing on a **local machine** (`git pull` into a local folder). Things that
+change locally — read before assuming cloud rules:
+
+- **You likely have a Swift/Xcode toolchain now.** Don't treat macOS CI as the
+  only compile gate — build & test locally: `xcodegen generate` then
+  `xcodebuild test -project Lucinate.xcodeproj -scheme Lucinate -destination
+  'platform=iOS Simulator,name=iPhone 16'` (or `open Lucinate.xcodeproj`). CI
+  is still the release path, but you can catch compile errors before pushing.
+- **GitHub access is different.** The cloud session used `mcp__github__*` MCP
+  tools and had NO `gh` CLI. Locally the reverse is normal — use the `gh` CLI
+  (or plain `git`) for PRs/releases/logs. Adapt; don't reach for MCP github
+  tools if they aren't wired up.
+- Cloud-only scaffolding does NOT carry over: scheduled wakeups, background
+  subagents, the scratchpad dir, and the saved tool-result files under
+  `~/.claude/projects/...`. Any "I'll check back in ~8 min" plan is gone —
+  verify releases synchronously after a local push.
+- Commit identity: the cloud stop-hook forced `noreply@anthropic.com` /
+  `Claude`. Locally, use the user's own git identity
+  (`nitinphilip@gmail.com`) — don't override it.
+
+### Current state at handoff
+
+- Branches synced: feature `claude/native-swift-rewrite-q5dnyg` @ `8b3f4ec`;
+  `main` @ `d770717` (the release job's `apps.json` [skip ci] patch — one
+  commit ahead of the feature branch, expected). Fast-forward the feature
+  branch onto `main` after pulling to pick up the apps.json patch.
+- **Latest shipped release: `ios-v2.0.8`** (native, unsigned IPA, from
+  `8b3f4ec`) — live on Feather. That was the **apk software updates** feature
+  (Settings ▸ System ▸ Software Updates: `apk update`/`upgrade` with staged
+  live progress). All planned tasks (Phases 0–6 + all fix batches) are done.
+
+### Open thread — router control without joining its WiFi
+
+User asked whether Bluetooth could manage the travel router without connecting
+to its WiFi. Conclusion: **not practical** — Lucinate speaks LuCI JSON-RPC →
+ubus over HTTP(S) (IP transport only); stock OpenWrt exposes no BLE control
+surface, and BT-capable routers (some GL.iNet) only do vendor-proprietary,
+per-model BLE provisioning. A real BT path needs a custom GATT↔ubus bridge on
+the router firmware — out of scope. The in-scope alternative discussed:
+**keep management over the router's WiFi while cellular stays active for
+internet** (iOS routes LAN-local over WiFi, internet over cellular when the
+WiFi has no usable uplink) — a small app-side change vs. Bluetooth. Also viable:
+USB-C→Ethernet into the router LAN, or same-LAN reach in repeater/bridge mode.
+Not yet started — waiting on the user to pick a direction.
