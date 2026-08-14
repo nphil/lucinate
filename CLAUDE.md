@@ -24,6 +24,15 @@ git and in the `ios-v1.1.x` release tags.
 - Format: top-level name/subtitle/description/iconURL/website/tintColor +
   `apps[]`, each app with a `versions[]` list (version, buildVersion, date,
   localizedDescription, downloadURL, size).
+- **Never break an iconURL path that ever shipped in `apps.json`.** Feather
+  copies the source-level icon URL into its local database once, when the user
+  adds the source, and never refreshes it — so a moved/deleted icon file blanks
+  the repo icon on every existing install with no way to fix it server-side
+  except restoring the old path. That's why
+  `ios/Runner/Assets.xcassets/AppIcon.appiconset/AppIcon~ios-marketing.png`
+  (the Flutter-era icon URL) still exists: it's a copy of the current 1024 icon
+  kept at the legacy path. Keep it in sync if the app icon changes; do not
+  delete it.
 
 ## CI/CD rules
 
