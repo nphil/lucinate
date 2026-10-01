@@ -142,22 +142,19 @@ struct RouterService: Sendable {
             ]))
     }
 
-    /// `file exec` with a long, non-retried timeout for slow commands.
-    func fileExecLong(command: String, params: [String], timeout: TimeInterval) async throws
-        -> JSONValue
-    {
-        try await transport.callLong(
-            "file", "exec",
-            .object([
-                "command": .string(command),
-                "params": .array(params.map { .string($0) }),
-            ]),
-            timeout: timeout)
+    // MARK: - Software updates (LuCI package-manager-call over cgi-io)
+
+    /// Whether this login can manage packages on this router.
+    enum PackageManagerSupport: Sendable, Equatable {
+        case available
+        /// The router runs opkg (OpenWrt 24.10 or older).
+        case opkgRouter
+        /// luci-app-package-manager is missing, or this login's rpcd ACL
+        /// doesn't grant it.
+        case notPermitted
     }
 
-    // MARK: - Software updates (apk)
-
-    /// Result of a package-manager command.
+    /// Result of one package-manager command.
     struct ExecResult: Sendable {
         let stdout: String
         let stderr: String
@@ -172,43 +169,91 @@ struct RouterService: Sendable {
         var succeeded: Bool { code == 0 }
     }
 
-    private static func execResult(_ json: JSONValue) -> ExecResult {
-        ExecResult(
+    enum PackageCommandError: Error, LocalizedError {
+        /// uhttpd stops waiting for a CGI after its 60 s script_timeout and
+        /// returns a truncated body; the command itself keeps running.
+        case incompleteReply
+
+        var errorDescription: String? {
+            "The router didn't send a complete reply in time. The command may still be "
+                + "running on the router."
+        }
+    }
+
+    /// LuCI's package wrapper. luci-app-package-manager's rpcd ACL grants
+    /// exec on exactly `list-installed`, `list-available`, `update` and
+    /// `upgrade *` here; `/usr/bin/apk` itself is never granted. The wrapper
+    /// silently drops `-` flags, so never pass options like `--simulate`.
+    private static let packageManagerCall = "/usr/libexec/package-manager-call"
+
+    func packageManagerSupport() async -> PackageManagerSupport {
+        if let features = try? await transport.call("luci", "getFeatures", .object([:])),
+            features["apk"].boolValue == false
+        {
+            return .opkgRouter
+        }
+        let call = Self.packageManagerCall
+        let required: [(scope: String, object: String, function: String)] = [
+            ("cgi-io", "exec", "read"),
+            ("file", "\(call) update", "exec"),
+            ("file", "\(call) list-installed", "exec"),
+            ("file", "\(call) list-available", "exec"),
+            ("file", "\(call) upgrade luci-base", "exec"),
+        ]
+        for check in required {
+            guard await sessionAllows(scope: check.scope, object: check.object, function: check.function)
+            else { return .notPermitted }
+        }
+        return .available
+    }
+
+    private func sessionAllows(scope: String, object: String, function: String) async -> Bool {
+        let result = try? await transport.call(
+            "session", "access",
+            .object([
+                "scope": .string(scope),
+                "object": .string(object),
+                "function": .string(function),
+            ]))
+        return result?["access"].boolValue == true
+    }
+
+    /// `apk update` — refresh the package index.
+    func packageIndexUpdate() async throws -> ExecResult {
+        try await packageManagerCommand(["update"])
+    }
+
+    /// `apk upgrade <name>` — upgrade one package (plus whatever dependencies
+    /// apk needs for it).
+    func upgradePackage(_ name: String) async throws -> ExecResult {
+        try await packageManagerCommand(["upgrade", name])
+    }
+
+    func installedPackages() async throws -> [PackageCatalog.Entry] {
+        try PackageCatalog.decode(
+            await transport.cgiExec(
+                command: Self.packageManagerCall, params: ["list-installed"], timeout: 60))
+    }
+
+    /// Every package in the configured feeds (~12 MB of JSON on a full index).
+    func availablePackages() async throws -> [PackageCatalog.Entry] {
+        try PackageCatalog.decode(
+            await transport.cgiExec(
+                command: Self.packageManagerCall, params: ["list-available"], timeout: 120))
+    }
+
+    /// update/upgrade reply with one JSON object `{code, pkmcmd, stdout, stderr}`
+    /// written after apk exits.
+    private func packageManagerCommand(_ params: [String]) async throws -> ExecResult {
+        let data = try await transport.cgiExec(
+            command: Self.packageManagerCall, params: params, timeout: 75)
+        guard let json = try? JSONValue.parse(data), let code = json["code"].intValue else {
+            throw PackageCommandError.incompleteReply
+        }
+        return ExecResult(
             stdout: json["stdout"].stringValue ?? "",
             stderr: json["stderr"].stringValue ?? "",
-            code: json["code"].intValue ?? 0)
-    }
-
-    /// apk-tools binary on modern (apk-based) OpenWrt.
-    private static let apkPath = "/usr/bin/apk"
-
-    /// Whether apk is present AND rpcd's ACL permits executing it (running
-    /// `apk --version` tests both — if either fails the feature is unavailable).
-    func apkAvailable() async -> Bool {
-        guard
-            let json = try? await fileExecLong(
-                command: Self.apkPath, params: ["--version"], timeout: 15)
-        else { return false }
-        return (json["code"].intValue ?? 1) == 0
-    }
-
-    /// `apk update` — refresh the package index. Non-mutating but can be slow.
-    func apkUpdate() async throws -> ExecResult {
-        Self.execResult(
-            try await fileExecLong(command: Self.apkPath, params: ["update"], timeout: 60))
-    }
-
-    /// `apk upgrade --simulate` — preview upgradable packages, no changes made.
-    func apkUpgradePreview() async throws -> ExecResult {
-        Self.execResult(
-            try await fileExecLong(
-                command: Self.apkPath, params: ["upgrade", "--simulate"], timeout: 60))
-    }
-
-    /// `apk upgrade` — perform the upgrade. Long-running, mutating, NOT retried.
-    func apkUpgrade() async throws -> ExecResult {
-        Self.execResult(
-            try await fileExecLong(command: Self.apkPath, params: ["upgrade"], timeout: 240))
+            code: code)
     }
 
     /// Kernel neighbor tables (ARP/NDP). LuCI's ACL grants exactly these

@@ -4,47 +4,92 @@ import UIKit
 
 // MARK: - Controller
 
-/// Drives the apk (OpenWrt package manager) update flow: check availability,
-/// refresh the index, preview upgradable packages, and perform the upgrade.
-/// All command output is accumulated into `log` for a terminal-style view.
+/// Drives the OpenWrt package update flow through LuCI's package-manager
+/// wrapper: check support, refresh the index, compare installed against
+/// available versions, then upgrade one package at a time so the screen can
+/// show live per-package progress. All command output is accumulated into
+/// `log` for a terminal-style view.
 @MainActor
 @Observable
 final class SoftwareUpdatesController {
     enum Stage {
         case idle          // connected, no check run yet
-        case checking      // running `apk update` + `apk upgrade --simulate`
-        case ready         // preview finished (see upgradeCount / previewPackages)
-        case upgrading     // running `apk upgrade`
-        case done          // upgrade completed
-        case unavailable   // apk not present / ACL denies it
+        case checking      // refreshing the index + comparing package lists
+        case ready         // check finished (see `upgrades`)
+        case upgrading     // installing `installItems` one by one, then verifying
+        case done          // install pass finished (see `installItems` states)
+        case unavailable   // no connection, opkg router, or no permission
     }
 
-    /// nil = not yet checked; true/false = apk usable on this router.
-    private(set) var available: Bool?
+    enum InstallState: Equatable {
+        case pending
+        case installing
+        case upgraded
+        /// No complete reply (connection dropped or the 60 s CGI limit hit);
+        /// resolved by the final version check when it can run.
+        case unconfirmed
+        /// Never attempted because the run stopped early.
+        case skipped
+        case failed(String)
+
+        var isFinished: Bool { self != .pending && self != .installing }
+    }
+
+    struct InstallItem: Identifiable {
+        let upgrade: PackageUpgrade
+        var state: InstallState
+
+        var id: String { upgrade.id }
+    }
+
+    /// nil = not yet checked.
+    private(set) var support: RouterService.PackageManagerSupport?
     private(set) var stage: Stage = .idle
     private(set) var isBusy = false
     private(set) var error: String?
 
-    /// Number of packages the preview reports as upgradable.
-    private(set) var upgradeCount = 0
-    /// Human-readable "name (old -> new)" lines parsed from the preview.
-    private(set) var previewPackages: [String] = []
+    /// Packages with a newer version available, in install order.
+    private(set) var upgrades: [PackageUpgrade] = []
+    /// Per-package progress of the current/last install run.
+    private(set) var installItems: [InstallItem] = []
+    private(set) var currentInstallIndex: Int?
+    private(set) var isVerifying = false
+
     /// Accumulated command output shown in the monospaced Output card.
     private(set) var log = ""
-    private(set) var didUpgrade = false
 
-    /// Index of the active progress step (0 refresh, 1 check, 2 install); steps
-    /// before it render as completed, the step at it spins, later ones are idle.
+    /// Index of the active check step (0 refresh, 1 download lists, 2 compare);
+    /// steps before it render as completed, the step at it spins.
     private(set) var activeStep = 0
     /// Caption describing the current long-running activity.
     private(set) var activity = ""
 
+    var finishedCount: Int { installItems.filter { $0.state.isFinished }.count }
+    var upgradedCount: Int { installItems.filter { $0.state == .upgraded }.count }
+
+    var installProgress: Double {
+        installItems.isEmpty ? 0 : Double(finishedCount) / Double(installItems.count)
+    }
+
+    var currentItem: InstallItem? {
+        guard let index = currentInstallIndex, installItems.indices.contains(index) else {
+            return nil
+        }
+        return installItems[index]
+    }
+
     // MARK: Availability
 
     func checkAvailability(service: RouterService) async {
-        let ok = await service.apkAvailable()
-        available = ok
-        if !ok { stage = .unavailable }
+        let result = await service.packageManagerSupport()
+        support = result
+        if result != .available { stage = .unavailable }
+    }
+
+    /// Marks the feature unavailable (e.g. no active connection).
+    func markUnavailable() {
+        support = .notPermitted
+        stage = .unavailable
     }
 
     // MARK: Check for updates
@@ -53,132 +98,162 @@ final class SoftwareUpdatesController {
         guard !isBusy else { return }
         isBusy = true
         error = nil
-        upgradeCount = 0
-        previewPackages = []
-        didUpgrade = false
+        upgrades = []
+        installItems = []
         stage = .checking
         defer { isBusy = false }
 
-        // Step 1: refresh the package index.
-        activeStep = 0
-        activity = "Refreshing package index…"
-        appendLog("$ apk update")
         do {
-            let update = try await service.apkUpdate()
+            activeStep = 0
+            activity = "Refreshing package index…"
+            appendLog("$ apk update")
+            let update = try await service.packageIndexUpdate()
             appendLog(update.combinedOutput)
-            if !update.succeeded {
+            guard update.succeeded else {
                 error = Self.failureMessage(update, fallback: "apk update failed.")
                 stage = .idle
                 return
             }
-        } catch {
-            self.error = Self.permissionMessage(error)
-            stage = .idle
-            return
-        }
 
-        // Step 2: simulate the upgrade to preview upgradable packages.
-        activeStep = 1
-        activity = "Checking for upgrades…"
-        appendLog("$ apk upgrade --simulate")
-        do {
-            let preview = try await service.apkUpgradePreview()
-            appendLog(preview.combinedOutput)
-            if !preview.succeeded {
-                error = Self.failureMessage(preview, fallback: "apk upgrade --simulate failed.")
-                stage = .ready
-                return
-            }
-            parsePreview(preview)
+            activeStep = 1
+            activity = "Downloading installed and available package lists…"
+            appendLog("$ apk query --installed / --available")
+            async let installedList = service.installedPackages()
+            async let availableList = service.availablePackages()
+            let (installed, available) = try await (installedList, availableList)
+            appendLog("\(installed.count) installed, \(available.count) available in feeds")
+
+            activeStep = 2
+            activity = "Comparing versions…"
+            upgrades = PackageCatalog.upgrades(installed: installed, available: available)
+            appendLog(
+                upgrades.isEmpty
+                    ? "Everything is up to date."
+                    : upgrades.map { "  \($0.name) \($0.installedVersion) -> \($0.availableVersion)" }
+                        .joined(separator: "\n"))
             stage = .ready
         } catch {
-            self.error = Self.permissionMessage(error)
-            stage = .ready
+            self.error = Self.message(for: error)
+            stage = .idle
         }
     }
 
     // MARK: Perform the upgrade
 
+    /// Upgrades each package in its own call (the wrapper only replies after
+    /// apk exits, so per-package calls are what makes progress live), then
+    /// re-reads installed versions so every row reports a confirmed result.
     func upgrade(service: RouterService) async {
-        guard !isBusy else { return }
+        guard !isBusy, !upgrades.isEmpty else { return }
         isBusy = true
         error = nil
         stage = .upgrading
-        activeStep = 2
-        activity = "Installing updates — this can take a few minutes and the connection may briefly drop…"
-        defer { isBusy = false }
+        installItems = upgrades.map { InstallItem(upgrade: $0, state: .pending) }
+        defer {
+            isBusy = false
+            currentInstallIndex = nil
+            isVerifying = false
+        }
 
-        appendLog("$ apk upgrade")
-        do {
-            let result = try await service.apkUpgrade()
-            appendLog(result.combinedOutput)
-            if result.succeeded {
-                didUpgrade = true
-                stage = .done
-            } else {
-                error = Self.failureMessage(result, fallback: "apk upgrade failed.")
-                stage = .ready
+        var consecutiveErrors = 0
+        var stoppedEarly = false
+        for index in installItems.indices {
+            // Already upgraded as a dependency of an earlier package.
+            guard installItems[index].state == .pending else { continue }
+            let package = installItems[index].upgrade
+            currentInstallIndex = index
+            installItems[index].state = .installing
+            activity = "Upgrading \(package.name)…"
+            appendLog("$ apk upgrade \(package.name)")
+            do {
+                let result = try await service.upgradePackage(package.name)
+                consecutiveErrors = 0
+                appendLog(result.combinedOutput)
+                markUpgraded(in: result.stdout)
+                if installItems[index].state == .installing {
+                    installItems[index].state =
+                        result.succeeded
+                        ? .upgraded
+                        : .failed(Self.firstLine(of: result.combinedOutput)
+                            ?? "apk exited with code \(result.code)")
+                }
+            } catch {
+                consecutiveErrors += 1
+                installItems[index].state = .unconfirmed
+                appendLog("! \(error.localizedDescription)")
+                // Two misses in a row: the router is restarting services or
+                // unreachable. Stop rather than fail the whole queue.
+                if consecutiveErrors >= 2 {
+                    stoppedEarly = true
+                    break
+                }
             }
+        }
+        currentInstallIndex = nil
+
+        isVerifying = true
+        activity = "Confirming installed versions…"
+        appendLog("$ apk query --installed")
+        var verifyFailure: String?
+        do {
+            verify(against: try await service.installedPackages())
         } catch {
-            self.error = Self.permissionMessage(error)
-            stage = .ready
-        }
-    }
-
-    /// Marks the feature unavailable (e.g. no active connection).
-    func markUnavailable() {
-        available = false
-        stage = .unavailable
-    }
-
-    // MARK: - Parsing
-
-    /// Parses the simulate output into readable package lines. Keeps lines that
-    /// describe a version change ("… -> …") or a numbered progress step
-    /// ("(1/3) Upgrading …"); falls back to all non-empty lines if that yields
-    /// nothing. Sets upgradeCount to 0 when the output reports no packages.
-    private func parsePreview(_ preview: RouterService.ExecResult) {
-        let combined = preview.combinedOutput
-        let rawLines = preview.stdout.split(separator: "\n", omittingEmptySubsequences: false)
-            .map(String.init)
-
-        if combined.isEmpty || combined.localizedCaseInsensitiveContains("0 packages") {
-            upgradeCount = 0
-            previewPackages = []
-            return
+            verifyFailure = Self.message(for: error)
         }
 
-        var parsed: [String] = []
-        for raw in rawLines {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard trimmed.contains(" -> ") || trimmed.hasPrefix("(") else { continue }
-            if let cleaned = Self.cleanPreviewLine(raw) { parsed.append(cleaned) }
+        for index in installItems.indices where installItems[index].state == .pending {
+            installItems[index].state = .skipped
         }
 
-        if parsed.isEmpty {
-            // Defensive fallback: show whatever non-empty lines we got.
-            parsed = rawLines
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
+        if stoppedEarly {
+            error = "Lost contact with the router partway through, so the rest were skipped. "
+                + "Reconnect, then tap Check Again to finish."
+        } else if let verifyFailure {
+            error = "Couldn't re-read installed versions (\(verifyFailure)). Reconnect, then "
+                + "tap Check Again to see where things stand."
         }
-
-        previewPackages = parsed
-        upgradeCount = parsed.count
-    }
-
-    /// Strips a leading "(1/3)" progress counter so the line reads as
-    /// "Upgrading luci-base (25.1.1 -> 25.1.2)". Returns nil for empty lines.
-    private static func cleanPreviewLine(_ raw: String) -> String? {
-        var line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !line.isEmpty else { return nil }
-        if let range = line.range(of: "^\\(\\d+/\\d+\\)\\s*", options: .regularExpression) {
-            line.removeSubrange(range)
-        }
-        line = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        return line.isEmpty ? nil : line
+        let allUpgraded = upgradedCount == installItems.count
+        appendLog("Upgraded \(upgradedCount) of \(installItems.count) packages.")
+        stage = .done
+        if allUpgraded { Haptics.success() } else { Haptics.warning() }
     }
 
     // MARK: - Helpers
+
+    /// Marks every package apk reported upgrading (the requested one plus any
+    /// dependencies it pulled in) as upgraded.
+    private func markUpgraded(in output: String) {
+        let upgraded = PackageCatalog.upgradedPackages(in: output)
+        for index in installItems.indices where upgraded[installItems[index].upgrade.name] != nil {
+            if !installItems[index].state.isFinished || installItems[index].state == .unconfirmed {
+                installItems[index].state = .upgraded
+            }
+        }
+    }
+
+    /// Settles every row against what is actually installed now.
+    private func verify(against installed: [PackageCatalog.Entry]) {
+        var versions: [String: String] = [:]
+        for entry in installed where versions[entry.name] == nil {
+            versions[entry.name] = entry.version
+        }
+        for index in installItems.indices {
+            let item = installItems[index]
+            let now = versions[item.upgrade.name]
+            if let now, ApkVersion.compare(now, item.upgrade.availableVersion) != .orderedAscending {
+                installItems[index].state = .upgraded
+                continue
+            }
+            switch item.state {
+            case .failed, .pending:
+                break
+            default:
+                installItems[index].state = .failed(
+                    now.map { "Still at \(PackageCatalog.displayVersion($0))" }
+                        ?? "No longer installed")
+            }
+        }
+    }
 
     private func appendLog(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -190,6 +265,10 @@ final class SoftwareUpdatesController {
         }
     }
 
+    private static func firstLine(of text: String) -> String? {
+        text.split(separator: "\n").first.map(String.init)
+    }
+
     private static func failureMessage(_ result: RouterService.ExecResult, fallback: String)
         -> String
     {
@@ -197,9 +276,12 @@ final class SoftwareUpdatesController {
         return output.isEmpty ? fallback : output
     }
 
-    private static func permissionMessage(_ error: Error) -> String {
-        "Could not run apk on the router (\(error.localizedDescription)). This usually means "
-            + "rpcd's ACL doesn't permit package management."
+    private static func message(for error: Error) -> String {
+        if let ubusError = error as? UbusError, case .ubusStatus(6, let detail) = ubusError {
+            return "The router refused the package command (\(detail ?? "permission denied")). "
+                + "This login needs permission to use luci-app-package-manager."
+        }
+        return error.localizedDescription
     }
 }
 
@@ -216,18 +298,7 @@ struct SoftwareUpdatesView: View {
     @State private var showRebootConfirm = false
 
     var body: some View {
-        content
-            .background(theme.background)
-            .foregroundStyle(theme.textPrimary)
-            .navigationTitle("Software Updates")
-            .navigationBarTitleDisplayMode(.inline)
-            .task {
-                guard let service = appState.service else {
-                    controller.markUnavailable()
-                    return
-                }
-                await controller.checkAvailability(service: service)
-            }
+        screen
             .confirmationDialog(
                 "Install Updates?",
                 isPresented: $showInstallConfirm,
@@ -261,6 +332,34 @@ struct SoftwareUpdatesView: View {
             }
     }
 
+    private var screen: some View {
+        content
+            .background(theme.background)
+            .foregroundStyle(theme.textPrimary)
+            .navigationTitle("Software Updates")
+            .navigationBarTitleDisplayMode(.inline)
+            // Leaving mid-install would hide progress of a run that keeps going.
+            .navigationBarBackButtonHidden(controller.stage == .upgrading)
+            .task {
+                guard let service = appState.service else {
+                    controller.markUnavailable()
+                    return
+                }
+                await controller.checkAvailability(service: service)
+            }
+            .onChange(of: controller.stage) { _, stage in
+                Self.keepScreenAwake(during: stage)
+            }
+            .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+    }
+
+    /// iOS suspends network work once the screen locks; keep it awake while
+    /// the router is being changed.
+    private static func keepScreenAwake(during stage: SoftwareUpdatesController.Stage) {
+        let busy = stage == .upgrading || stage == .checking
+        UIApplication.shared.isIdleTimerDisabled = busy
+    }
+
     // MARK: Content
 
     @ViewBuilder
@@ -272,16 +371,14 @@ struct SoftwareUpdatesView: View {
                 message: "Connect to a router to manage package updates."
             )
             .padding(.top, Spacing.xxl)
-        } else if controller.available == false {
+        } else if let support = controller.support, support != .available {
             EmptyStateView(
                 systemImage: "shippingbox",
                 title: "Package Updates Unavailable",
-                message: "This router either doesn't use the apk package manager or its rpcd "
-                    + "ACL doesn't permit package management. Installing "
-                    + "luci-mod-package-manager on the router enables it."
+                message: unavailableMessage(support)
             )
             .padding(.top, Spacing.xxl)
-        } else if controller.available == nil {
+        } else if controller.support == nil {
             VStack {
                 ProgressView("Checking package manager…")
                     .padding(.top, Spacing.xxl)
@@ -298,6 +395,18 @@ struct SoftwareUpdatesView: View {
                 }
                 .padding(Spacing.md)
             }
+        }
+    }
+
+    private func unavailableMessage(_ support: RouterService.PackageManagerSupport) -> String {
+        switch support {
+        case .opkgRouter:
+            return "This router uses opkg (OpenWrt 24.10 or older). Package updates in "
+                + "Lucinate need an apk-based router (OpenWrt 25.12 or newer)."
+        case .notPermitted, .available:
+            return "This login can't manage packages. Install luci-app-package-manager on the "
+                + "router (LuCI → System → Software) and sign in as root, or grant this user "
+                + "its permissions."
         }
     }
 
@@ -350,10 +459,12 @@ struct SoftwareUpdatesView: View {
         switch controller.stage {
         case .idle:
             Card { checkButton("Check for Updates") }
-        case .checking, .upgrading:
-            progressCard
+        case .checking:
+            checkProgressCard
         case .ready:
             readyCard
+        case .upgrading:
+            installProgressCard
         case .done:
             doneCard
         case .unavailable:
@@ -377,14 +488,14 @@ struct SoftwareUpdatesView: View {
         .disabled(controller.isBusy)
     }
 
-    // MARK: Progress (stepper)
+    // MARK: Check progress (stepper)
 
-    private var progressCard: some View {
+    private var checkProgressCard: some View {
         Card {
             VStack(alignment: .leading, spacing: Spacing.md) {
-                stepRow(index: 0, title: "Refresh index")
-                stepRow(index: 1, title: "Check upgrades")
-                stepRow(index: 2, title: "Install")
+                stepRow(index: 0, title: "Refresh package index")
+                stepRow(index: 1, title: "Download package lists")
+                stepRow(index: 2, title: "Compare versions")
                 if !controller.activity.isEmpty {
                     Text(controller.activity)
                         .font(.caption)
@@ -425,7 +536,7 @@ struct SoftwareUpdatesView: View {
 
     @ViewBuilder
     private var readyCard: some View {
-        if controller.upgradeCount == 0 {
+        if controller.upgrades.isEmpty {
             Card {
                 VStack(alignment: .leading, spacing: Spacing.md) {
                     HStack(spacing: Spacing.sm) {
@@ -442,17 +553,16 @@ struct SoftwareUpdatesView: View {
         } else {
             Card {
                 VStack(alignment: .leading, spacing: Spacing.md) {
-                    Text(updateCountLabel(controller.upgradeCount) + " available")
+                    Text(updateCountLabel(controller.upgrades.count) + " available")
                         .font(.cardTitle)
                         .foregroundStyle(theme.textPrimary)
 
-                    VStack(alignment: .leading, spacing: Spacing.xs) {
-                        ForEach(Array(controller.previewPackages.enumerated()), id: \.offset) {
-                            _, package in
-                            Text(package)
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundStyle(theme.textSecondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: Spacing.sm) {
+                        ForEach(controller.upgrades) { upgrade in
+                            packageRow(upgrade, detail: versionChange(upgrade)) {
+                                Image(systemName: "arrow.up.circle")
+                                    .foregroundStyle(theme.accent)
+                            }
                         }
                     }
 
@@ -460,7 +570,7 @@ struct SoftwareUpdatesView: View {
                         Haptics.warning()
                         showInstallConfirm = true
                     } label: {
-                        Text("Install " + updateCountLabel(controller.upgradeCount))
+                        Text("Install " + updateCountLabel(controller.upgrades.count))
                             .font(.headline)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, Spacing.xs)
@@ -473,37 +583,191 @@ struct SoftwareUpdatesView: View {
         }
     }
 
-    // MARK: Done
+    // MARK: Install progress (live)
 
-    private var doneCard: some View {
+    private var installProgressCard: some View {
         Card {
             VStack(alignment: .leading, spacing: Spacing.md) {
-                HStack(spacing: Spacing.sm) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .foregroundStyle(theme.success)
-                    Text("Updated " + packageCountLabel(controller.upgradeCount))
+                HStack(alignment: .firstTextBaseline) {
+                    Text(controller.isVerifying ? "Confirming versions" : "Installing updates")
                         .font(.cardTitle)
                         .foregroundStyle(theme.textPrimary)
                     Spacer()
+                    Text("\(controller.finishedCount) of \(controller.installItems.count)")
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(theme.textSecondary)
+                        .contentTransition(.numericText())
                 }
-                Text("A reboot is often needed after core package upgrades.")
-                    .font(.caption)
+
+                ProgressView(value: controller.installProgress)
+                    .tint(theme.accent)
+                    .animation(.easeInOut(duration: 0.3), value: controller.installProgress)
+
+                currentActivity
+
+                Text(
+                    "Keep Lucinate open until this finishes. Packages install one at a time, "
+                        + "and the connection can blip when network services restart."
+                )
+                .font(.caption)
+                .foregroundStyle(theme.textSecondary)
+
+                Divider()
+                packageChecklist
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var currentActivity: some View {
+        if let item = controller.currentItem {
+            HStack(alignment: .top, spacing: Spacing.sm) {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 22, height: 22)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Upgrading \(item.upgrade.name)")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(theme.textPrimary)
+                    Text(versionChange(item.upgrade))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(theme.textSecondary)
+                }
+                Spacer()
+                Text(percentLabel)
+                    .font(.caption.monospacedDigit())
                     .foregroundStyle(theme.textSecondary)
+            }
+        } else if controller.isVerifying {
+            HStack(spacing: Spacing.sm) {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 22, height: 22)
+                Text("Re-reading installed versions…")
+                    .font(.subheadline)
+                    .foregroundStyle(theme.textPrimary)
+            }
+        }
+    }
 
-                Button {
-                    Haptics.impact(.light)
-                    showRebootConfirm = true
-                } label: {
-                    Label("Reboot Router", systemImage: "arrow.clockwise.circle")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, Spacing.xs)
+    private var packageChecklist: some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            ForEach(controller.installItems) { item in
+                packageRow(item.upgrade, detail: installDetail(item)) {
+                    installIcon(item.state)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .tint(theme.warning)
-                .disabled(appState.isRebooting)
+            }
+        }
+    }
 
-                checkButton("Check Again")
+    @ViewBuilder
+    private func installIcon(_ state: SoftwareUpdatesController.InstallState) -> some View {
+        switch state {
+        case .pending:
+            Image(systemName: "circle")
+                .foregroundStyle(theme.textSecondary)
+        case .installing:
+            ProgressView()
+                .controlSize(.small)
+        case .upgraded:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(theme.success)
+        case .unconfirmed:
+            Image(systemName: "questionmark.circle")
+                .foregroundStyle(theme.warning)
+        case .skipped:
+            Image(systemName: "minus.circle")
+                .foregroundStyle(theme.textSecondary)
+        case .failed:
+            Image(systemName: "xmark.circle.fill")
+                .foregroundStyle(theme.error)
+        }
+    }
+
+    private func installDetail(_ item: SoftwareUpdatesController.InstallItem) -> String {
+        switch item.state {
+        case .failed(let reason): return reason
+        case .unconfirmed: return "No reply yet — will be confirmed at the end"
+        case .skipped: return "Skipped"
+        default: return versionChange(item.upgrade)
+        }
+    }
+
+    private func packageRow<Icon: View>(
+        _ upgrade: PackageUpgrade, detail: String, @ViewBuilder icon: () -> Icon
+    ) -> some View {
+        HStack(alignment: .top, spacing: Spacing.sm) {
+            icon()
+                .frame(width: 22, height: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(upgrade.name)
+                    .font(.subheadline)
+                    .foregroundStyle(theme.textPrimary)
+                Text(detail)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    // MARK: Done
+
+    private var percentLabel: String {
+        let percent = Int((controller.installProgress * 100).rounded())
+        return "\(percent)%"
+    }
+
+    private var doneTitle: String {
+        let total = controller.installItems.count
+        let upgraded = controller.upgradedCount
+        if upgraded == total { return "Updated " + packageCountLabel(total) }
+        return "Updated \(upgraded) of " + packageCountLabel(total)
+    }
+
+    private var doneCard: some View {
+        let allUpgraded = controller.upgradedCount == controller.installItems.count
+        let icon = allUpgraded ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
+        let iconColor = allUpgraded ? theme.success : theme.warning
+        return VStack(spacing: Spacing.md) {
+            Card {
+                VStack(alignment: .leading, spacing: Spacing.md) {
+                    HStack(spacing: Spacing.sm) {
+                        Image(systemName: icon)
+                            .foregroundStyle(iconColor)
+                        Text(doneTitle)
+                            .font(.cardTitle)
+                            .foregroundStyle(theme.textPrimary)
+                        Spacer()
+                    }
+                    Text("A reboot is often needed after core package upgrades.")
+                        .font(.caption)
+                        .foregroundStyle(theme.textSecondary)
+
+                    Button {
+                        Haptics.impact(.light)
+                        showRebootConfirm = true
+                    } label: {
+                        Label("Reboot Router", systemImage: "arrow.clockwise.circle")
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, Spacing.xs)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .tint(theme.warning)
+                    .disabled(appState.isRebooting || controller.upgradedCount == 0)
+
+                    checkButton("Check Again")
+                }
+            }
+            Card {
+                VStack(alignment: .leading, spacing: Spacing.md) {
+                    Text("Packages")
+                        .font(.cardTitle)
+                        .foregroundStyle(theme.textPrimary)
+                    packageChecklist
+                }
             }
         }
     }
@@ -558,6 +822,11 @@ struct SoftwareUpdatesView: View {
             .split(separator: "\n", omittingEmptySubsequences: false)
             .enumerated()
             .map { LogLine(id: $0.offset, text: String($0.element)) }
+    }
+
+    private func versionChange(_ upgrade: PackageUpgrade) -> String {
+        PackageCatalog.displayVersion(upgrade.installedVersion) + " → "
+            + PackageCatalog.displayVersion(upgrade.availableVersion)
     }
 
     private func updateCountLabel(_ count: Int) -> String {

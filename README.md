@@ -37,6 +37,17 @@ it was developed on a Linux container with no Swift toolchain.
   `/ubus` endpoint (`uhttpd-mod-ubus` + `session.login`), which would drop the
   cookie dance — not used because it requires extra router-side setup.
 - **No third-party dependencies.** Foundation/SwiftUI/Charts/Security only.
+- **Package updates go through LuCI's own wrapper, over cgi-io.** Settings →
+  Software Updates runs `/usr/libexec/package-manager-call` via
+  `/cgi-bin/cgi-exec` (what LuCI's package page uses). rpcd ACLs never grant
+  `/usr/bin/apk` itself, ubus `file exec` is SIGKILLed at rpcd's 30 s timeout,
+  and the wrapper drops `-` flags (so `--simulate` would really upgrade).
+  Upgrades are computed by comparing `list-installed` with `list-available`
+  (apk's exact version ordering, ported in `PackageCatalog.swift`) and then
+  installed one package per call, which is what makes per-package live
+  progress possible and keeps each call under uhttpd's 60 s CGI limit.
+  Packages that can restart the web stack or the network install last; a
+  final re-read of installed versions confirms every row.
 - **Themes are hand-authored tokens** (not seed-generated): 10 dark + 10 light
   palettes that reskin background/surfaces/text/separators/semantic colors and
   the chart series (RX = `success`, TX = `info`).
@@ -56,7 +67,8 @@ it was developed on a Linux container with no Swift toolchain.
 ### Not done (Tier C / known gaps)
 
 - Throughput Live Activity / home-screen widget (Tier C) — skipped.
-- Per-client bandwidth (nlbwmon) and opkg update check (Tier C) — skipped.
+- Per-client bandwidth (nlbwmon) (Tier C) — skipped. Package updates shipped
+  later (apk routers only; opkg routers get an explanation instead).
 - Global search across tabs (bonus in the plan) — per-list `.searchable` only.
 - Landscape gets scrolling layouts rather than a bespoke Home arrangement.
 - Client actions (WoL/block/reserve) are hidden in All-Routers aggregate mode

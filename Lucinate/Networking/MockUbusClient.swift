@@ -71,6 +71,20 @@ actor MockUbusClient: UbusCalling {
         "advertise_routes": .array([.string("192.168.1.0/24")]),
     ]
 
+    /// Package-manager demo: name → (installed, newest available).
+    /// `upgrade` moves a package's installed version to its available one.
+    private var mockPackages: [String: (installed: String, available: String)] = [
+        "luci-base": ("26.187.49110~99464ec", "26.270.72870~a24d1f2"),
+        "luci-mod-network": ("26.187.49110~99464ec", "26.270.72870~a24d1f2"),
+        "rpcd": ("2026.06.04~28faf640-r1", "2026.07.19~e37ed9d8-r1"),
+        "libustream-mbedtls": ("2025.01.20~1f5c2a3d-r1", "2025.06.02~9e4b7c11-r1"),
+        "ca-bundle": ("20260601-r1", "20260816-r1"),
+        "curl": ("8.19.0-r2", "8.22.0-r1"),
+        "dnsmasq-full": ("2.90-r3", "2.91-r1"),
+        "busybox": ("1.37.0-r4", "1.37.0-r4"),
+        "dropbear": ("2025.88-r2", "2025.88-r2"),
+    ]
+
     init() {}
 
     // MARK: - UbusCalling
@@ -123,9 +137,7 @@ actor MockUbusClient: UbusCalling {
         case "file.read":
             return fileRead(path: params["path"].stringValue ?? "")
         case "file.exec":
-            return fileExec(
-                command: params["command"].stringValue ?? "",
-                args: params["params"].arrayValue?.compactMap { $0.stringValue } ?? [])
+            return .object(["stdout": .string(""), "stderr": .string(""), "code": .number(0)])
 
         case "luci.wireguard.getWgInstances":
             return Self.wireGuardInstances(now: Int(Date().timeIntervalSince1970))
@@ -142,8 +154,62 @@ actor MockUbusClient: UbusCalling {
             }
             return .object([:])
 
+        case "session.access":
+            return .object(["access": .bool(true)])
+        case "luci.getFeatures":
+            return .object(["apk": .bool(true), "opkg": .bool(false)])
+
         default:
             throw UbusError.ubusStatus(4, "not found")
+        }
+    }
+
+    func cgiExec(command: String, params: [String], timeout: TimeInterval) async throws -> Data {
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        guard command == "/usr/libexec/package-manager-call" else {
+            throw UbusError.ubusStatus(6, "Access to command denied by ACL")
+        }
+        func reply(_ stdout: String, code: Int = 0) throws -> Data {
+            try JSONValue.object(["code": .number(Double(code)), "stdout": .string(stdout)])
+                .encoded()
+        }
+        func packageList(installed: Bool) throws -> Data {
+            try JSONValue.array(
+                mockPackages.keys.sorted().map { name in
+                    let versions = mockPackages[name]
+                    return .object([
+                        "name": .string(name),
+                        "version": .string(
+                            (installed ? versions?.installed : versions?.available) ?? ""),
+                    ])
+                }
+            ).encoded()
+        }
+
+        switch params.first {
+        case "update":
+            return try reply(
+                " [https://downloads.openwrt.org/releases/25.12.5/packages/aarch64_cortex-a53/base/packages.adb]\n"
+                    + "OK: 9841 distinct packages available")
+        case "list-installed":
+            return try packageList(installed: true)
+        case "list-available":
+            return try packageList(installed: false)
+        case "upgrade":
+            guard params.count == 2, let entry = mockPackages[params[1]] else {
+                return try reply("OK: 9841 distinct packages available")
+            }
+            // Feel like a real install.
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            mockPackages[params[1]] = (entry.available, entry.available)
+            if entry.installed == entry.available {
+                return try reply("OK: 214 MiB in 187 packages")
+            }
+            return try reply(
+                "(1/1) Upgrading \(params[1]) (\(entry.installed) -> \(entry.available))\n"
+                    + "OK: 214 MiB in 187 packages")
+        default:
+            return try reply("", code: 1)
         }
     }
 
@@ -600,36 +666,6 @@ actor MockUbusClient: UbusCalling {
             return .object(["data": .string(Self.travelmateRuntime)])
         }
         return .object(["data": .string("")])
-    }
-
-    private func fileExec(command: String, args: [String]) -> JSONValue {
-        func ok(_ out: String) -> JSONValue {
-            .object(["stdout": .string(out), "stderr": .string(""), "code": .number(0)])
-        }
-        if command.hasSuffix("/apk") {
-            switch args.first {
-            case "--version":
-                return ok("apk-tools 3.0.0")
-            case "update":
-                return ok("fetch https://downloads.openwrt.org/.../packages\nUpdated 4 repositories, 3421 packages available")
-            case "upgrade" where args.contains("--simulate"):
-                return ok(
-                    "(1/3) Upgrading luci-base (25.1.1 -> 25.1.2)\n"
-                        + "(2/3) Upgrading libustream-mbedtls (2025.01.20 -> 2025.06.02)\n"
-                        + "(3/3) Upgrading dnsmasq-full (2.90-3 -> 2.91-1)\n"
-                        + "OK: 3 packages would be upgraded")
-            case "upgrade":
-                return ok(
-                    "(1/3) Upgrading luci-base (25.1.1 -> 25.1.2)\n"
-                        + "(2/3) Upgrading libustream-mbedtls (2025.01.20 -> 2025.06.02)\n"
-                        + "(3/3) Upgrading dnsmasq-full (2.90-3 -> 2.91-1)\n"
-                        + "Executing dnsmasq-full-2.91-1.post-install\n"
-                        + "OK: 3 packages upgraded")
-            default:
-                return ok("")
-            }
-        }
-        return .object(["stdout": .string(""), "stderr": .string(""), "code": .number(0)])
     }
 
     // MARK: - wireguard

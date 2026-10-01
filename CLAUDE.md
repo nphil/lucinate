@@ -17,6 +17,20 @@ git and in the `ios-v1.1.x` release tags.
   `Lucinate/Resources/Assets.xcassets/AppIcon.appiconset/`. The PNGs are
   committed, so a build needs no icon tooling.
 
+## Router-side constraints (learned against OpenWrt 25.12)
+
+- Package management must use `/usr/libexec/package-manager-call` over
+  `/cgi-bin/cgi-exec` (see README "Decisions"). Calling `/usr/bin/apk` is
+  denied by ACL; ubus `file exec` is killed at rpcd's 30 s timeout; uhttpd
+  cuts a CGI reply at 60 s (the command keeps running). The wrapper silently
+  drops `-` flags, so never pass `--simulate` or similar.
+- A test router is reachable as `ssh travelrouter` (Tailscale). For ACL
+  experiments, create a scoped session with `ubus call session create` +
+  `session grant` and curl `127.0.0.1/cgi-bin/cgi-exec` on the router; destroy
+  it afterwards.
+- Swift logic that only needs Foundation can be compiled and unit-tested on
+  the NAS with `docker run swift:6.1-noble` (`ssh unraid`) before CI.
+
 ## iOS distribution: Feather / AltStore source
 
 - The repo ships an AltStore/Feather source at `apps.json` (repo root).
