@@ -298,27 +298,7 @@ struct SoftwareUpdatesView: View {
     @State private var showRebootConfirm = false
 
     var body: some View {
-        content
-            .background(theme.background)
-            .foregroundStyle(theme.textPrimary)
-            .navigationTitle("Software Updates")
-            .navigationBarTitleDisplayMode(.inline)
-            // Leaving mid-install would hide progress of a run that keeps going.
-            .navigationBarBackButtonHidden(controller.stage == .upgrading)
-            .task {
-                guard let service = appState.service else {
-                    controller.markUnavailable()
-                    return
-                }
-                await controller.checkAvailability(service: service)
-            }
-            // iOS suspends network work once the screen locks; keep it awake
-            // while the router is being changed.
-            .onChange(of: controller.stage) { _, stage in
-                UIApplication.shared.isIdleTimerDisabled =
-                    stage == .upgrading || stage == .checking
-            }
-            .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+        screen
             .confirmationDialog(
                 "Install Updates?",
                 isPresented: $showInstallConfirm,
@@ -350,6 +330,34 @@ struct SoftwareUpdatesView: View {
             } message: {
                 Text("A reboot is often needed after core package upgrades.")
             }
+    }
+
+    private var screen: some View {
+        content
+            .background(theme.background)
+            .foregroundStyle(theme.textPrimary)
+            .navigationTitle("Software Updates")
+            .navigationBarTitleDisplayMode(.inline)
+            // Leaving mid-install would hide progress of a run that keeps going.
+            .navigationBarBackButtonHidden(controller.stage == .upgrading)
+            .task {
+                guard let service = appState.service else {
+                    controller.markUnavailable()
+                    return
+                }
+                await controller.checkAvailability(service: service)
+            }
+            .onChange(of: controller.stage) { _, stage in
+                Self.keepScreenAwake(during: stage)
+            }
+            .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+    }
+
+    /// iOS suspends network work once the screen locks; keep it awake while
+    /// the router is being changed.
+    private static func keepScreenAwake(during stage: SoftwareUpdatesController.Stage) {
+        let busy = stage == .upgrading || stage == .checking
+        UIApplication.shared.isIdleTimerDisabled = busy
     }
 
     // MARK: Content
@@ -626,7 +634,7 @@ struct SoftwareUpdatesView: View {
                         .foregroundStyle(theme.textSecondary)
                 }
                 Spacer()
-                Text("\(Int((controller.installProgress * 100).rounded()))%")
+                Text(percentLabel)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(theme.textSecondary)
             }
@@ -706,26 +714,31 @@ struct SoftwareUpdatesView: View {
 
     // MARK: Done
 
-    private var doneCard: some View {
+    private var percentLabel: String {
+        let percent = Int((controller.installProgress * 100).rounded())
+        return "\(percent)%"
+    }
+
+    private var doneTitle: String {
         let total = controller.installItems.count
         let upgraded = controller.upgradedCount
-        let allUpgraded = upgraded == total
+        if upgraded == total { return "Updated " + packageCountLabel(total) }
+        return "Updated \(upgraded) of " + packageCountLabel(total)
+    }
+
+    private var doneCard: some View {
+        let allUpgraded = controller.upgradedCount == controller.installItems.count
+        let icon = allUpgraded ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
+        let iconColor = allUpgraded ? theme.success : theme.warning
         return VStack(spacing: Spacing.md) {
             Card {
                 VStack(alignment: .leading, spacing: Spacing.md) {
                     HStack(spacing: Spacing.sm) {
-                        Image(
-                            systemName: allUpgraded
-                                ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
-                        )
-                        .foregroundStyle(allUpgraded ? theme.success : theme.warning)
-                        Text(
-                            allUpgraded
-                                ? "Updated " + packageCountLabel(total)
-                                : "Updated \(upgraded) of " + packageCountLabel(total)
-                        )
-                        .font(.cardTitle)
-                        .foregroundStyle(theme.textPrimary)
+                        Image(systemName: icon)
+                            .foregroundStyle(iconColor)
+                        Text(doneTitle)
+                            .font(.cardTitle)
+                            .foregroundStyle(theme.textPrimary)
                         Spacer()
                     }
                     Text("A reboot is often needed after core package upgrades.")
@@ -743,7 +756,7 @@ struct SoftwareUpdatesView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.large)
                     .tint(theme.warning)
-                    .disabled(appState.isRebooting || upgraded == 0)
+                    .disabled(appState.isRebooting || controller.upgradedCount == 0)
 
                     checkButton("Check Again")
                 }
