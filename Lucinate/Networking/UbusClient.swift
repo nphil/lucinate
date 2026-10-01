@@ -104,19 +104,12 @@ final class TOFUTrustDelegate: NSObject, URLSessionDelegate, @unchecked Sendable
 
 protocol UbusCalling: Sendable {
     func call(_ object: String, _ procedure: String, _ params: JSONValue) async throws -> JSONValue
-    /// Single-attempt, long-timeout call for slow mutating commands. Defaults
-    /// to a plain `call` (the mock ignores the timeout).
-    func callLong(
-        _ object: String, _ procedure: String, _ params: JSONValue, timeout: TimeInterval
-    ) async throws -> JSONValue
-}
-
-extension UbusCalling {
-    func callLong(
-        _ object: String, _ procedure: String, _ params: JSONValue, timeout: TimeInterval
-    ) async throws -> JSONValue {
-        try await call(object, procedure, params)
-    }
+    /// Runs a command through cgi-io's `/cgi-bin/cgi-exec` (what LuCI's
+    /// `fs.exec_direct` uses) and returns its raw stdout. Unlike ubus
+    /// `file exec` it isn't killed at rpcd's timeout and isn't size-capped,
+    /// so it suits package management. Single attempt: callers must never
+    /// have a mutating command silently re-issued.
+    func cgiExec(command: String, params: [String], timeout: TimeInterval) async throws -> Data
 }
 
 // MARK: - UbusClient
@@ -299,17 +292,12 @@ actor UbusClient: UbusCalling {
         try await rawCall(sessionID: "", object: object, procedure: procedure, params: .object([:]))
     }
 
-    /// A single-attempt call with a long timeout, for slow **mutating**
-    /// commands (e.g. `apk upgrade`) where the transient-retry loop must NOT
-    /// re-issue the command. Still honors the 3-concurrent gate.
-    func callLong(
-        _ object: String, _ procedure: String, _ params: JSONValue, timeout: TimeInterval
-    ) async throws -> JSONValue {
+    func cgiExec(command: String, params: [String], timeout: TimeInterval) async throws -> Data {
         guard let token else { throw UbusError.notLoggedIn }
         return try await semaphore.run { [endpoint, session] in
-            try await Self.executeRPC(
+            try await Self.executeCgiExec(
                 session: session, endpoint: endpoint, sessionID: token,
-                object: object, procedure: procedure, params: params, timeout: timeout)
+                command: command, params: params, timeout: timeout)
         }
     }
 
@@ -342,7 +330,7 @@ actor UbusClient: UbusCalling {
 
     private static func executeRPC(
         session: URLSession, endpoint: RouterEndpoint, sessionID: String,
-        object: String, procedure: String, params: JSONValue, timeout: TimeInterval = 15
+        object: String, procedure: String, params: JSONValue
     ) async throws -> JSONValue {
         guard let url = URL(string: "\(endpoint.baseURLString)/cgi-bin/luci/admin/ubus") else {
             throw UbusError.invalidResponse
@@ -350,7 +338,7 @@ actor UbusClient: UbusCalling {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = timeout
+        request.timeoutInterval = 15
 
         let envelope: JSONValue = .object([
             "jsonrpc": .string("2.0"),
@@ -391,6 +379,55 @@ actor UbusClient: UbusCalling {
             throw UbusError.ubusStatus(status, message)
         }
         return items.count > 1 ? items[1] : .null
+    }
+
+    private static func executeCgiExec(
+        session: URLSession, endpoint: RouterEndpoint, sessionID: String,
+        command: String, params: [String], timeout: TimeInterval
+    ) async throws -> Data {
+        guard let url = URL(string: "\(endpoint.baseURLString)/cgi-bin/cgi-exec") else {
+            throw UbusError.invalidResponse
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(
+            "application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = timeout
+        // cgi-io splits the command line on unescaped whitespace; escape the
+        // way LuCI does (backslash before backslashes and whitespace).
+        let commandLine = ([command] + params).map(cgiEscape).joined(separator: " ")
+        let body =
+            "sessionid=\(formEncode(sessionID))&command=\(formEncode(commandLine))&stderr=0"
+        request.httpBody = Data(body.utf8)
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw Self.mapTransportError(error, endpoint: endpoint)
+        }
+        guard let http = response as? HTTPURLResponse else { throw UbusError.invalidResponse }
+        switch http.statusCode {
+        case 200:
+            return data
+        case 403:
+            // cgi-io: "Exec permission denied" / "Access to command denied by ACL".
+            let message = String(decoding: data, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw UbusError.ubusStatus(6, message.isEmpty ? nil : message)
+        default:
+            throw UbusError.httpStatus(http.statusCode)
+        }
+    }
+
+    private static func cgiEscape(_ argument: String) -> String {
+        var escaped = ""
+        for character in argument {
+            if character == "\\" || character.isWhitespace { escaped.append("\\") }
+            escaped.append(character)
+        }
+        return escaped
     }
 
     private static func mapTransportError(_ error: Error, endpoint: RouterEndpoint) -> UbusError {
