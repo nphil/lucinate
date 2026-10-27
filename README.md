@@ -13,10 +13,11 @@ open Lucinate.xcodeproj  # scheme: Lucinate
 ```
 
 CI (`.github/workflows/ios-native-build.yml`) runs on every push to
-`claude/native-swift-rewrite*` branches: `macos-26` runner (Xcode 26 / iOS 26
-SDK), `xcodegen generate`, simulator build, then unit tests on the first
-available iPhone simulator. That workflow is the compile gate for this code —
-it was developed on a Linux container with no Swift toolchain.
+`claude/native-swift-rewrite*` branches: GitHub's `xcode-27` runner (Xcode 27 /
+iOS 27 SDK), `xcodegen generate`, simulator build, then unit tests on the first
+available iPhone simulator. The deployment target stays iOS 26. That workflow is
+the compile gate for this code — it was developed on a Linux container with no
+Swift toolchain.
 
 ## Decisions
 
@@ -36,7 +37,18 @@ it was developed on a Linux container with no Swift toolchain.
   session jar (robust across redirects). A future option is the native
   `/ubus` endpoint (`uhttpd-mod-ubus` + `session.login`), which would drop the
   cookie dance — not used because it requires extra router-side setup.
-- **No third-party dependencies.** Foundation/SwiftUI/Charts/Security only.
+- **No third-party dependencies.** Foundation/SwiftUI/Charts/Security/Network/
+  WebKit only.
+- **Session recovery.** LuCI answers an expired session with JSON-RPC -32002
+  "Access denied" for every call. The client re-logs in once (shared by
+  concurrent callers) and retries; an object missing from the session-free
+  `list` reply is reported as not installed instead. Only read-only calls are
+  retried after a timeout, so a mutation is never sent twice.
+- **Hotel sign-in runs in-app over Wi-Fi only.** travelmate reports a portal as
+  `net cp '<host>'`. While iOS treats a Wi-Fi as captive it is not the default
+  route, so the sign-in WKWebView goes through a loopback proxy whose upstream
+  connections require Wi-Fi; a Wi-Fi-pinned probe of Apple's captive URL
+  detects when sign-in is done.
 - **Package updates go through LuCI's own wrapper, over cgi-io.** Settings →
   Software Updates runs `/usr/libexec/package-manager-call` via
   `/cgi-bin/cgi-exec` (what LuCI's package page uses). rpcd ACLs never grant
@@ -71,26 +83,32 @@ it was developed on a Linux container with no Swift toolchain.
   later (apk routers only; opkg routers get an explanation instead).
 - Global search across tabs (bonus in the plan) — per-list `.searchable` only.
 - Landscape gets scrolling layouts rather than a bespoke Home arrangement.
-- Client actions (WoL/block/reserve) are hidden in All-Routers aggregate mode
-  by design — they act on the active router only.
+- Clients come from the active router only; the earlier All Routers aggregate
+  view was removed.
 
 ## What to test on-device
 
 1. **Login** against a real router (http, https with self-signed cert → the
-   Accept Risk flow, `host:port` forms). Auto-relogin after backgrounding.
+   Accept Risk flow, `host:port` forms). An expired router session (router
+   reboot, long background) is renewed silently on the next call.
 2. **Reviewer mode**: 5-second long-press on the login brand → type `REVIEWER`.
    Whole app runs on mock data.
 3. **Home**: live throughput chart (2s cadence), vitals, cards jump to the
    right tab. Customize Dashboard prefs persist per router.
-4. **Clients**: All Routers vs This Router toggle, expand, copy fields,
-   Reserve IP / Wake on LAN / Block internet on the active router.
-5. **TravelMate**: scan + add uplink, forget (swipe), broadcast band 2.4/5/Both,
-   channel picker suggestions, captive-portal banner.
-6. **Tailscale**: exit-node switch, MagicDNS/Shields-Up confirms (danger copy),
-   peers list. Full `form_data` writes — verify no flags get cleared.
-7. **Reboot** from the hostname menu / Control Center: lockout overlay +
+4. **Clients**: expand, copy fields, Reserve IP / Wake on LAN / Block internet.
+   The uplink's access point must not appear as a client.
+5. **TravelMate**: scan + add uplink, Saved badge + Reconnect for a network
+   travelmate paused, forget (swipe), broadcast band 2.4/5/Both, channel picker
+   suggestions.
+6. **Hotel sign-in**: behind a portal (travelmate `net cp`) the banner appears
+   and the in-app sign-in sheet opens once; it closes itself once the internet
+   works.
+7. **Tailscale**: exit-node switch, MagicDNS/Shields-Up confirms (danger copy),
+   peers list. Full `form_data` writes — verify no flags get cleared. Behind a
+   portal it reads "not connected yet", never "not installed".
+8. **Reboot** from the hostname menu / Control Center: lockout overlay +
    auto-reconnect when the router returns.
-8. **Themes**: all 20 palettes reskin every screen incl. chart colors;
+9. **Themes**: all 20 palettes reskin every screen incl. chart colors;
    System/Light/Dark mode switching.
 
 ## Layout
