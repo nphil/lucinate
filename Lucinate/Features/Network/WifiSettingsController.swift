@@ -166,21 +166,31 @@ final class WifiSettingsController {
 
     // MARK: - Mutations
 
-    /// Applies option changes to a wireless section (iface or device),
+    /// Applies option changes to one wireless section (iface or device),
     /// commits, reloads wifi, then refreshes the local model.
     /// Returns false (and sets `error`) on failure.
     func apply(section: String, values: [String: String], service: RouterService?) async -> Bool {
+        await apply(changes: [(section: section, values: values)], service: service)
+    }
+
+    /// Applies changes to several wireless sections (e.g. an AP iface and its
+    /// radio) with one commit and one wifi reload, then refreshes the local
+    /// model. The router reverts the staged edits itself when the commit
+    /// fails. Returns false (and sets `error`) on failure.
+    func apply(
+        changes: [(section: String, values: [String: String])], service: RouterService?
+    ) async -> Bool {
         guard let service else {
             error = "Not connected"
             return false
         }
-        guard !values.isEmpty else { return true }
+        guard changes.contains(where: { !$0.values.isEmpty }) else { return true }
 
         isBusy = true
         defer { isBusy = false }
 
         do {
-            try await service.updateWireless(section: section, values: values)
+            try await service.updateWireless(changes: changes)
             error = nil
             await load(service: service)
             return true

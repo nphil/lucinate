@@ -64,21 +64,57 @@ struct TailscalePeer: Sendable, Identifiable, Equatable {
 }
 
 struct TailscaleStatus: Sendable, Equatable {
-    /// `running` | `logout` (needs login) | `not_installed` | `` (unknown).
-    let state: String
+    /// What the router's Tailscale daemon is doing, from `get_status.status`.
+    enum State: Sendable, Equatable {
+        /// The plugin found no tailscale binary (`not_installed`).
+        case notInstalled
+        /// `logout`: tailscaled is up but this node is not signed in.
+        case needsLogin
+        case running
+        /// The plugin answers with an empty status whenever `tailscale status
+        /// --json` fails or the backend is neither Running nor NeedsLogin
+        /// (Starting, NoState, Stopped, ...) — typical while the router sits
+        /// behind a hotel portal with no internet. Never means "missing".
+        case notConnected
+
+        init(pluginStatus raw: String?) {
+            let normalized = (raw ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            switch normalized {
+            case "running": self = .running
+            case "logout": self = .needsLogin
+            case "not_installed": self = .notInstalled
+            default: self = .notConnected
+            }
+        }
+    }
+
+    let state: State
     let version: String
-    let ipv4: String
+    /// Tailnet addresses; nil while the plugin only has its placeholder text.
+    let ipv4: String?
     let ipv6: String?
     let domainName: String
     let peers: [TailscalePeer]
 
+    /// First daemon health warning (e.g. the control server is unreachable);
+    /// nil when there is none.
+    let health: String?
+
+    /// tailscaled runs on a kernel TUN device (true) or in userspace
+    /// networking (false); nil when the plugin does not report it.
+    let tunMode: Bool?
+
     init(
-        state: String,
+        state: State,
         version: String,
-        ipv4: String,
+        ipv4: String?,
         ipv6: String?,
         domainName: String,
-        peers: [TailscalePeer]
+        peers: [TailscalePeer],
+        health: String? = nil,
+        tunMode: Bool? = nil
     ) {
         self.state = state
         self.version = version
@@ -86,15 +122,14 @@ struct TailscaleStatus: Sendable, Equatable {
         self.ipv6 = ipv6
         self.domainName = domainName
         self.peers = peers
+        self.health = health
+        self.tunMode = tunMode
     }
 
-    var isRunning: Bool { state == "running" }
-    var needsLogin: Bool { state == "logout" }
-    var isInstalled: Bool { !state.isEmpty && state != "not_installed" }
+    var isRunning: Bool { state == .running }
 
     // Convenience aliases used by the UI layer.
-    var isConnected: Bool { isRunning }
-    var tailnetIP: String? { ipv4.isEmpty ? nil : ipv4 }
+    var tailnetIP: String? { ipv4 }
     var tailnetName: String? { domainName.isEmpty ? nil : domainName }
     var exitNodeName: String? { currentExitNode?.hostname }
     var peersOnline: Int { onlinePeerCount }
@@ -123,19 +158,50 @@ struct TailscaleStatus: Sendable, Equatable {
         // Stable ordering (the peers map is unordered).
         peers.sort { $0.hostname.lowercased() < $1.hostname.lowercased() }
         return TailscaleStatus(
-            state: json["status"].coercedString ?? "",
+            state: State(pluginStatus: json["status"].coercedString),
             version: json["version"].coercedString ?? "",
-            ipv4: json["ipv4"].coercedString ?? "",
-            ipv6: json["ipv6"].coercedString,
+            ipv4: address(from: json["ipv4"].coercedString),
+            ipv6: address(from: json["ipv6"].coercedString),
             domainName: json["domain_name"].coercedString ?? "",
-            peers: peers
+            peers: peers,
+            health: trimmedOrNil(json["health"].coercedString),
+            tunMode: json["TUNMode"].boolValue
         )
     }
 
+    /// The plugin fills `ipv4` with prose ("Not running", "No IP assigned")
+    /// when it has no address, so only address-shaped text counts.
+    private static func address(from raw: String?) -> String? {
+        guard let candidate = trimmedOrNil(raw),
+            candidate.contains(where: { $0 == "." || $0 == ":" }),
+            candidate.allSatisfy({ $0.isHexDigit || $0 == "." || $0 == ":" })
+        else { return nil }
+        return candidate
+    }
+
+    private static func trimmedOrNil(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !trimmed.isEmpty
+        else { return nil }
+        return trimmed
+    }
+
+    /// Placeholder before the first reply; callers check the controller's
+    /// `loaded` flag instead of reading this as a state.
     static let empty = TailscaleStatus(
-        state: "",
+        state: .notConnected,
         version: "",
-        ipv4: "",
+        ipv4: nil,
+        ipv6: nil,
+        domainName: "",
+        peers: []
+    )
+
+    /// The `tailscale` ubus object is not registered on the router.
+    static let notInstalled = TailscaleStatus(
+        state: .notInstalled,
+        version: "",
+        ipv4: nil,
         ipv6: nil,
         domainName: "",
         peers: []

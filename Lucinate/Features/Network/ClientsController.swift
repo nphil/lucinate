@@ -2,87 +2,67 @@ import Foundation
 import Observation
 
 /// Loads and caches the client list for the Network → Clients segment,
-/// mirroring `clients_screen.dart` (fetchAggregatedClients /
-/// fetchClientsForSelectedRouter).
+/// mirroring `clients_screen.dart` (fetchClientsForSelectedRouter).
 @MainActor
 @Observable
 final class ClientsController {
-    /// When true, gather clients from every saved router (the Flutter "All"
-    /// segment). Persisted across launches; defaults to true.
-    private(set) var aggregateAll: Bool
-
     private(set) var clients: [Client] = []
     /// True only while loading with nothing cached (cached-first UX).
     private(set) var isLoading = false
     private(set) var error: String?
 
-    /// Uppercased MACs blocked by app-created firewall rules on the ACTIVE
-    /// router. Only populated in selected-router mode — in aggregate mode the
-    /// active service may not match a client's router, so actions are hidden.
+    /// Uppercased MACs blocked by app-created firewall rules on the active
+    /// router.
     private(set) var blockedMACs: Set<String> = []
     /// True when `etherwake` exists on the active router (checked once per
-    /// load, selected-router mode only).
+    /// load).
     private(set) var wolAvailable = false
 
-    private static let aggregateDefaultsKey = "clients_aggregate_all"
-
-    init() {
-        let defaults = UserDefaults.standard
-        if defaults.object(forKey: ClientsController.aggregateDefaultsKey) == nil {
-            aggregateAll = true
-        } else {
-            aggregateAll = defaults.bool(forKey: ClientsController.aggregateDefaultsKey)
-        }
-    }
-
-    func setAggregateAll(_ value: Bool) {
-        guard value != aggregateAll else { return }
-        aggregateAll = value
-        UserDefaults.standard.set(value, forKey: ClientsController.aggregateDefaultsKey)
-    }
+    /// Router the cached state belongs to: switching routers must not keep
+    /// showing the previous router's clients while (or instead of) loading
+    /// the new one.
+    @ObservationIgnored private var loadedRouterID: String?
 
     // MARK: - Loading
 
-    /// Loads clients. Pass the active service and the saved-router list in;
-    /// the controller never retains AppState.
-    func load(service: RouterService?, routers: [Router]) async {
+    /// Loads the active router's clients. Pass the active service in; the
+    /// controller never retains AppState.
+    func load(service: RouterService?, routerID: String?) async {
+        if routerID != loadedRouterID {
+            loadedRouterID = routerID
+            clear()
+        }
+        guard let service else {
+            clear()
+            return
+        }
+
         if clients.isEmpty { isLoading = true }
         defer { isLoading = false }
 
-        if aggregateAll && !routers.isEmpty {
-            // ALL mode: connect to every saved router in parallel, skipping
-            // failures silently (mirrors fetchAggregatedClients).
-            let gathered = await withTaskGroup(of: [Client].self) { group in
-                for router in routers {
-                    group.addTask { await ClientsController.gatherFromRouter(router) }
-                }
-                var all: [Client] = []
-                for await part in group { all.append(contentsOf: part) }
-                return all
-            }
+        do {
+            let gathered = try await ClientsController.gather(service: service)
             clients = ClientsController.dedupeAndSort(gathered)
             error = nil
-            blockedMACs = []
-            wolAvailable = false
-        } else if let service {
-            // SELECTED mode: the already-connected service only.
-            do {
-                let gathered = try await ClientsController.gather(service: service)
-                clients = ClientsController.dedupeAndSort(gathered)
-                error = nil
-            } catch {
-                if clients.isEmpty {
-                    self.error = error.localizedDescription
-                }
+        } catch {
+            if clients.isEmpty {
+                self.error = error.localizedDescription
             }
-            blockedMACs = (try? await service.blockedClientMACs()) ?? []
-            wolAvailable = await service.isToolAvailable("etherwake")
-        } else {
-            clients = []
-            error = nil
-            blockedMACs = []
-            wolAvailable = false
         }
+        // A failed lookup keeps the previous answer: an empty set would show
+        // "Block" on devices that are in fact blocked.
+        let blocked = try? await service.blockedClientMACs()
+        if let blocked {
+            blockedMACs = blocked
+        }
+        wolAvailable = await service.isToolAvailable("etherwake")
+    }
+
+    private func clear() {
+        clients = []
+        error = nil
+        blockedMACs = []
+        wolAvailable = false
     }
 
     /// Local bookkeeping after a successful block/unblock, so the UI updates
@@ -113,25 +93,7 @@ final class ClientsController {
         }
     }
 
-    // MARK: - Per-router gather
-
-    /// Logs into one saved router, gathers its clients, and always tears the
-    /// connection down. Failures return an empty list (aggregate mode skips
-    /// unreachable routers silently).
-    private nonisolated static func gatherFromRouter(_ router: Router) async -> [Client] {
-        let address = (router.useHttps ? "https://" : "") + router.ipAddress
-        guard let endpoint = try? RouterEndpoint.parse(address) else { return [] }
-        let client = UbusClient(endpoint: endpoint)
-        var result: [Client] = []
-        do {
-            _ = try await client.login(username: router.username, password: router.password)
-            result = (try? await gather(service: RouterService(transport: client))) ?? []
-        } catch {
-            // Skip this router silently.
-        }
-        await client.invalidate()
-        return result
-    }
+    // MARK: - Gather
 
     /// DHCP(v4+v6) leases + wireless association MACs from one router, merged
     /// into Client values and enriched with LuCI host hints. Throws only when
@@ -159,14 +121,16 @@ final class ClientsController {
             leaseError = error
         }
 
-        // Wireless association MACs, per SSID device, fetched in parallel.
+        // Wireless association MACs, per broadcast ifname, fetched in
+        // parallel. A STA uplink is skipped: its assoclist is the upstream
+        // hotel AP, which would otherwise show up as an "Unknown" Wi-Fi client.
         var wirelessMACs = Set<String>()
         var wirelessAvailable = false
         do {
             let json = try await service.wirelessDevices()
             wirelessAvailable = true
             let networks = WirelessNetwork.fromWirelessDevices(json)
-            let devices = Set(networks.map(\.device).filter { !$0.isEmpty })
+            let devices = WirelessNetwork.broadcastDevices(in: networks)
             await withTaskGroup(of: [String].self) { group in
                 for device in devices {
                     group.addTask {
@@ -422,7 +386,7 @@ struct ClientRate: Equatable {
     let txBytesPerSecond: Double
 }
 
-/// Polls `iwinfo assoclist` for the ACTIVE router's wireless ifnames every
+/// Polls `iwinfo assoclist` for the given broadcast ifnames every
 /// 3 seconds and publishes per-MAC rates. Kept separate from
 /// ClientsController so the 3s tick only re-renders the tiny speed badges
 /// that read `rates` — never the client rows or list.
@@ -440,7 +404,8 @@ final class ClientSpeedsController {
     @ObservationIgnored private var samples: [String: Sample] = [:]
     @ObservationIgnored private var pollTask: Task<Void, Never>?
 
-    /// Starts polling the given wireless ifnames. Replaces any previous run.
+    /// Starts polling the given broadcast (AP) ifnames — never STA uplinks,
+    /// whose assoclist is the upstream access point. Replaces any previous run.
     func start(service: RouterService, devices: [String]) {
         stop()
         guard !devices.isEmpty else { return }

@@ -107,6 +107,7 @@ struct InterfacesListView: View {
             if iface.name.lowercased().contains(query) { return true }
             if iface.device.lowercased().contains(query) { return true }
             if iface.protocolName.lowercased().contains(query) { return true }
+            if iface.typeLabel.lowercased().contains(query) { return true }
             if let ip = iface.ipAddress, ip.lowercased().contains(query) { return true }
             return false
         }
@@ -181,23 +182,6 @@ struct InterfacesListView: View {
     }
 }
 
-// MARK: - Protocol display names
-
-/// Human-readable label for a uci interface proto. Notably, proto "none" is
-/// a valid unmanaged interface (e.g. Tailscale), not an error — show
-/// "Unmanaged" instead of the raw token.
-private func protocolDisplayName(_ raw: String) -> String {
-    switch raw.lowercased() {
-    case "", "none": return "Unmanaged"
-    case "dhcp": return "DHCP"
-    case "dhcpv6": return "DHCPv6"
-    case "static": return "Static"
-    case "pppoe": return "PPPoE"
-    case "wireguard": return "WireGuard"
-    default: return raw.capitalized
-    }
-}
-
 // MARK: - Wired interface card
 
 private struct WiredInterfaceCard: View {
@@ -226,7 +210,7 @@ private struct WiredInterfaceCard: View {
 
     private var header: some View {
         HStack(spacing: Spacing.sm) {
-            Image(systemName: protoIcon)
+            Image(systemName: iface.systemImage)
                 .font(.subheadline)
                 .foregroundStyle(iface.isUp ? theme.accent : theme.textSecondary)
                 .frame(width: 34, height: 34)
@@ -251,9 +235,9 @@ private struct WiredInterfaceCard: View {
         }
     }
 
-    /// "proto • ip (+N)" — mirrors _buildMinimalInterfaceSubtitle.
+    /// "type • ip (+N)" — mirrors _buildMinimalInterfaceSubtitle.
     private var subtitle: String {
-        let proto = protocolDisplayName(iface.protocolName)
+        let proto = iface.typeLabel
         var shown: String?
         var extra = 0
         if let ipv4 = iface.ipAddress, !ipv4.isEmpty {
@@ -265,15 +249,6 @@ private struct WiredInterfaceCard: View {
         guard let shown else { return proto }
         if extra > 0 { return "\(proto) • \(shown)  +\(extra)" }
         return "\(proto) • \(shown)"
-    }
-
-    private var protoIcon: String {
-        switch iface.protocolName.lowercased() {
-        case "wireguard": return "shield"
-        case "static": return "cable.connector"
-        case "dhcp": return "network"
-        default: return "point.3.connected.trianglepath.dotted"
-        }
     }
 
     private var statusChip: some View {
@@ -291,7 +266,7 @@ private struct WiredInterfaceCard: View {
     private var details: some View {
         VStack(spacing: 0) {
             IfaceDetailRow(label: "Device", value: iface.device, monospaced: true)
-            IfaceDetailRow(label: "Protocol", value: protocolDisplayName(iface.protocolName))
+            IfaceDetailRow(label: "Type", value: iface.typeLabel)
             IfaceDetailRow(label: "Uptime", value: iface.formattedUptime)
             if let ip = iface.ipAddress, !ip.isEmpty {
                 IfaceDetailRow(label: "IP Address", value: ip, copyable: true, monospaced: true)
@@ -470,10 +445,12 @@ private struct WirelessInterfaceCard: View {
             IfaceDetailRow(label: "Device", value: deviceLabel, monospaced: true)
             IfaceDetailRow(label: "Mode", value: network.mode.uppercased())
             IfaceDetailRow(label: "Channel", value: channelText)
-            IfaceDetailRow(
-                label: "Signal",
-                value: network.signal.map { "\($0) dBm" } ?? "-- dBm"
-            )
+            if network.isUplink {
+                IfaceDetailRow(
+                    label: "Signal",
+                    value: network.signal.map { "\($0) dBm" } ?? "-- dBm"
+                )
+            }
             IfaceDetailRow(label: "Network", value: network.network ?? "N/A")
         }
     }

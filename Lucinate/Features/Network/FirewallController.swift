@@ -175,10 +175,11 @@ final class FirewallController {
         defer { isBusy = false }
 
         do {
-            try await service.uciSet(
-                config: "firewall", section: section,
-                values: ["enabled": enabled ? "1" : "0"])
-            try await commitAndReloadFirewall(service: service)
+            try await applyEdits(service: service) {
+                try await service.uciSet(
+                    config: "firewall", section: section,
+                    values: ["enabled": enabled ? "1" : "0"])
+            }
             error = nil
             await load(service: service)
         } catch {
@@ -205,20 +206,21 @@ final class FirewallController {
         isBusy = true
         defer { isBusy = false }
         do {
-            try await service.uciAdd(
-                config: "firewall", type: "redirect",
-                values: [
-                    "name": name,
-                    "src": "wan",
-                    "src_dport": srcDPort,
-                    "dest": "lan",
-                    "dest_ip": destIP,
-                    "dest_port": destPort,
-                    "proto": proto,
-                    "target": "DNAT",
-                    "enabled": "1",
-                ])
-            try await commitAndReloadFirewall(service: service)
+            try await applyEdits(service: service) {
+                try await service.uciAdd(
+                    config: "firewall", type: "redirect",
+                    values: [
+                        "name": name,
+                        "src": "wan",
+                        "src_dport": srcDPort,
+                        "dest": "lan",
+                        "dest_ip": destIP,
+                        "dest_port": destPort,
+                        "proto": proto,
+                        "target": "DNAT",
+                        "enabled": "1",
+                    ])
+            }
             error = nil
             await load(service: service)
             return true
@@ -229,6 +231,9 @@ final class FirewallController {
     }
 
     /// Rewrites an existing redirect's options (leaves `enabled` untouched).
+    /// `src`, `dest` and `target` are never sent: the form has no field for
+    /// them, and writing wan -> lan DNAT over them would rewrite a redirect
+    /// that uses other zones.
     func updateForward(
         section: String, name: String, proto: String, srcDPort: String, destIP: String,
         destPort: String, service: RouterService
@@ -236,19 +241,17 @@ final class FirewallController {
         isBusy = true
         defer { isBusy = false }
         do {
-            try await service.uciSet(
-                config: "firewall", section: section,
-                values: [
-                    "name": name,
-                    "src": "wan",
-                    "src_dport": srcDPort,
-                    "dest": "lan",
-                    "dest_ip": destIP,
-                    "dest_port": destPort,
-                    "proto": proto,
-                    "target": "DNAT",
-                ])
-            try await commitAndReloadFirewall(service: service)
+            try await applyEdits(service: service) {
+                try await service.uciSet(
+                    config: "firewall", section: section,
+                    values: [
+                        "name": name,
+                        "src_dport": srcDPort,
+                        "dest_ip": destIP,
+                        "dest_port": destPort,
+                        "proto": proto,
+                    ])
+            }
             error = nil
             await load(service: service)
             return true
@@ -262,8 +265,9 @@ final class FirewallController {
         isBusy = true
         defer { isBusy = false }
         do {
-            try await service.uciDelete(config: "firewall", section: section)
-            try await commitAndReloadFirewall(service: service)
+            try await applyEdits(service: service) {
+                try await service.uciDelete(config: "firewall", section: section)
+            }
             forwards.removeAll { $0.section == section }
             error = nil
             await load(service: service)
@@ -276,8 +280,21 @@ final class FirewallController {
 
     // MARK: - Plumbing
 
-    private func commitAndReloadFirewall(service: RouterService) async throws {
-        try await service.uciCommit(config: "firewall")
+    /// Runs the uci edits, commits, then reloads the firewall. A failure up to
+    /// and including the commit reverts the staged edits: otherwise `uci get`
+    /// would keep showing values the firewall never applied, and the next
+    /// unrelated commit would ship them. A failing reload comes after a
+    /// successful commit, when nothing is staged any more.
+    private func applyEdits(
+        service: RouterService, _ edits: () async throws -> Void
+    ) async throws {
+        do {
+            try await edits()
+            try await service.uciCommit(config: "firewall")
+        } catch {
+            try? await service.uciRevert(config: "firewall")
+            throw error
+        }
         _ = try await service.fileExec(command: "/etc/init.d/firewall", params: ["reload"])
     }
 }

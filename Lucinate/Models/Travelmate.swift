@@ -20,11 +20,39 @@ enum Travelmate {
     }
 }
 
+/// What travelmate's own internet check found on the active uplink.
+enum UplinkConnectivity: Sendable, Equatable {
+    /// `net ok`: the probe URL answered normally.
+    case online
+    /// `net cp '<host>'`: the probe was redirected to a sign-in page. `host`
+    /// is nil when travelmate reported none.
+    case captivePortal(host: String?)
+    /// `net nok` / `net fail`: associated, but nothing gets through.
+    case noInternet
+    /// Not connected, still connecting, or a status this app doesn't know.
+    case unknown
+}
+
+/// The five uplink states the UI tells apart.
+enum UplinkPhase: Sendable, Equatable {
+    case online
+    case signInNeeded
+    case noInternet
+    case connecting
+    case notConnected
+}
+
 struct TravelmateStatus: Sendable, Equatable {
+    /// Travelmate's live status file; the fields below come from its `data`
+    /// object.
+    static let runtimeFilePath = "/var/run/travelmate/travelmate.runtime.json"
+
     /// From `travelmate.global.trm_enabled`.
     let enabled: Bool
 
-    /// Raw status text, e.g. `"connected, net ok/72"` or `"error"`/``.
+    /// Raw `travelmate_status`: `connected, net ok/72`,
+    /// `connected, net cp 'portal.example.com'/72`, `connected, net nok/40`,
+    /// `processing`, `not connected` or `program error`.
     let statusText: String
 
     /// SSID of the currently active uplink (parsed from `station_id`).
@@ -33,8 +61,9 @@ struct TravelmateStatus: Sendable, Equatable {
     /// Radio backing the active uplink (e.g. `radio0`).
     let activeDevice: String
 
-    /// A captive portal was detected on the active uplink.
-    let captive: Bool
+    /// Result of travelmate's internet check on the active uplink; `.unknown`
+    /// unless the status text carries one.
+    let connectivity: UplinkConnectivity
 
     let subnet: String
 
@@ -43,69 +72,168 @@ struct TravelmateStatus: Sendable, Equatable {
         statusText: String,
         activeSsid: String,
         activeDevice: String,
-        captive: Bool,
+        connectivity: UplinkConnectivity,
         subnet: String
     ) {
         self.enabled = enabled
         self.statusText = statusText
         self.activeSsid = activeSsid
         self.activeDevice = activeDevice
-        self.captive = captive
+        self.connectivity = connectivity
         self.subnet = subnet
     }
 
+    private var normalizedStatus: String {
+        statusText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
     var isConnected: Bool {
-        statusText.lowercased().hasPrefix("connected")
+        normalizedStatus.hasPrefix("connected")
+    }
+
+    /// Travelmate is trying to bring an uplink up.
+    var isProcessing: Bool {
+        normalizedStatus == "processing"
+    }
+
+    /// Travelmate itself failed (e.g. its interface is missing on ubus).
+    var hasError: Bool {
+        normalizedStatus == "program error"
+    }
+
+    /// Hostname of the sign-in page when a captive portal was detected.
+    var portalHost: String? {
+        if case .captivePortal(let host) = connectivity { return host }
+        return nil
+    }
+
+    var phase: UplinkPhase {
+        switch connectivity {
+        case .online: return .online
+        case .captivePortal: return .signInNeeded
+        case .noInternet: return .noInternet
+        case .unknown:
+            // `connected, -`: associated, but the internet check hasn't
+            // reported yet.
+            return (isProcessing || isConnected) ? .connecting : .notConnected
+        }
+    }
+
+    /// Same status with the master switch replaced (optimistic toggle).
+    func withEnabled(_ enabled: Bool) -> TravelmateStatus {
+        TravelmateStatus(
+            enabled: enabled,
+            statusText: statusText,
+            activeSsid: activeSsid,
+            activeDevice: activeDevice,
+            connectivity: connectivity,
+            subnet: subnet
+        )
+    }
+
+    /// Whether both statuses describe the same connection. The signal quality
+    /// inside the status text (`/72`) drifts between reads and is ignored.
+    func hasSameConnection(as other: TravelmateStatus) -> Bool {
+        phase == other.phase && activeSsid == other.activeSsid
+            && activeDevice == other.activeDevice
     }
 
     /// Builds status from the raw JSON string held in `file.read`'s `data`
     /// field (the contents of travelmate.runtime.json).
     static func fromRuntime(_ rawData: String, enabled: Bool) -> TravelmateStatus {
-        let fallback = TravelmateStatus(
-            enabled: enabled,
-            statusText: "",
-            activeSsid: "",
-            activeDevice: "",
-            captive: false,
-            subnet: ""
-        )
-
         guard let data = rawData.data(using: .utf8),
             let outer = try? JSONValue.parse(data),
             let inner = outer["data"].objectValue
         else {
-            return fallback
+            return TravelmateStatus(
+                enabled: enabled,
+                statusText: "",
+                activeSsid: "",
+                activeDevice: "",
+                connectivity: .unknown,
+                subnet: ""
+            )
         }
         let d = JSONValue.object(inner)
 
-        // station_id looks like "radio0/SSID/bssid".
-        let station = d["station_id"].coercedString ?? ""
-        let parts = station.components(separatedBy: "/")
-        var device = parts.first?.trimmingCharacters(in: .whitespaces) ?? ""
-        var ssid = parts.count > 1
-            ? parts[1].trimmingCharacters(in: .whitespaces)
-            : ""
-        if ssid == "-" { ssid = "" }
-        if device == "-" { device = "" }
-
+        let station = parseStationID(d["station_id"].coercedString ?? "")
         let statusText = d["travelmate_status"].coercedString ?? ""
-        let lowerStatus = statusText.lowercased()
-        let connected = lowerStatus.hasPrefix("connected")
-        // A captive portal shows up as the connectivity check failing
-        // ("net nok") or an explicit "captive" state — NOT the run_flags
-        // "captive: check-mark", which only means captive DETECTION is
-        // enabled. When the status reports "net ok", the internet works and
-        // there is no portal.
-        let captive = connected
-            && (lowerStatus.contains("captive") || lowerStatus.contains("nok"))
 
         return TravelmateStatus(
             enabled: enabled,
             statusText: statusText,
-            activeSsid: ssid,
-            activeDevice: device,
-            captive: captive,
+            activeSsid: station.ssid,
+            activeDevice: station.device,
+            connectivity: connectivity(fromStatusText: statusText),
             subnet: d["station_subnet"].coercedString ?? ""
+        )
+    }
+
+    /// Reads the internet-check result out of `travelmate_status`. The run
+    /// flags in the same file (`captive: ✔`) only say that detection is
+    /// switched on, so they are deliberately not consulted.
+    static func connectivity(fromStatusText statusText: String) -> UplinkConnectivity {
+        let text = statusText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.lowercased().hasPrefix("connected"),
+            let comma = text.firstIndex(of: ",")
+        else { return .unknown }
+
+        // "connected, net cp 'host'/72" -> "net cp 'host'/72"
+        let check = text[text.index(after: comma)...]
+            .trimmingCharacters(in: .whitespaces)
+        guard check.lowercased().hasPrefix("net ") else { return .unknown }
+
+        let detail = check.dropFirst(4)
+        let kind = detail.prefix(while: { $0 != " " && $0 != "/" }).lowercased()
+        switch kind {
+        case "ok": return .online
+        case "nok", "fail": return .noInternet
+        case "cp": return .captivePortal(host: quotedHost(in: detail))
+        default: return .unknown
+        }
+    }
+
+    /// `'portal.example.com'/72` -> `portal.example.com`; nil when absent/empty.
+    private static func quotedHost(in text: Substring) -> String? {
+        guard let open = text.firstIndex(of: "'") else { return nil }
+        let start = text.index(after: open)
+        guard let close = text[start...].firstIndex(of: "'") else { return nil }
+        let host = text[start..<close].trimmingCharacters(in: .whitespaces)
+        return host.isEmpty ? nil : host
+    }
+
+    /// Splits `station_id` (`radio/ssid/bssid`, `-` for an empty part). An SSID
+    /// may contain `/` itself, so the radio ends at the first slash and the
+    /// BSSID starts after the last. The SSID is kept verbatim (trailing spaces
+    /// are legal) so it still equals the saved uplink's.
+    static func parseStationID(_ raw: String) -> (device: String, ssid: String, bssid: String) {
+        func part(_ text: String, trimmed: Bool = true) -> String {
+            let value = trimmed ? text.trimmingCharacters(in: .whitespaces) : text
+            return value == "-" ? "" : value
+        }
+        guard let first = raw.firstIndex(of: "/") else { return (part(raw), "", "") }
+        let device = part(String(raw[..<first]))
+        let rest = raw[raw.index(after: first)...]
+        guard let last = rest.lastIndex(of: "/") else {
+            return (device, part(String(rest), trimmed: false), "")
+        }
+        return (
+            device,
+            part(String(rest[..<last]), trimmed: false),
+            part(String(rest[rest.index(after: last)...]))
+        )
+    }
+
+    /// What the file reads like right after travelmate (re)starts, before its
+    /// first status write.
+    static func processing(enabled: Bool) -> TravelmateStatus {
+        TravelmateStatus(
+            enabled: enabled,
+            statusText: "processing",
+            activeSsid: "",
+            activeDevice: "",
+            connectivity: .unknown,
+            subnet: ""
         )
     }
 
@@ -114,7 +242,7 @@ struct TravelmateStatus: Sendable, Equatable {
         statusText: "",
         activeSsid: "",
         activeDevice: "",
-        captive: false,
+        connectivity: .unknown,
         subnet: ""
     )
 }
@@ -124,13 +252,19 @@ struct TravelmateUplink: Sendable, Identifiable, Equatable {
     let sectionId: String
     let ssid: String
     let device: String
+    /// False once travelmate gives up on the network (3 failed connection
+    /// attempts) or detects a BSSID mismatch; it never retries on its own
+    /// until the flag is set again.
     let enabled: Bool
+    /// Optional BSSID pin. The app never sets one, but uplinks added in LuCI may.
+    let bssid: String
 
-    init(sectionId: String, ssid: String, device: String, enabled: Bool) {
+    init(sectionId: String, ssid: String, device: String, enabled: Bool, bssid: String = "") {
         self.sectionId = sectionId
         self.ssid = ssid
         self.device = device
         self.enabled = enabled
+        self.bssid = bssid
     }
 
     var id: String { sectionId }
@@ -146,8 +280,103 @@ struct TravelmateUplink: Sendable, Identifiable, Equatable {
             sectionId: sectionId,
             ssid: section["ssid"].coercedString ?? "",
             device: section["device"].coercedString ?? "",
-            enabled: (section["enabled"].coercedString ?? "1") == "1"
+            // Travelmate reads a missing `enabled` as off (`f_getval "enabled" "0"`).
+            enabled: section["enabled"].coercedString == "1",
+            bssid: section["bssid"].coercedString ?? ""
         )
+    }
+}
+
+/// How a scanned network relates to the networks already saved.
+enum SavedNetworkMatch: Sendable, Equatable {
+    case notSaved
+    /// Same SSID on the same radio. Travelmate treats these as one network.
+    case saved(TravelmateUplink)
+    /// Same SSID, but only for another radio (the 2.4 and 5 GHz copies of a
+    /// network are separate uplinks), so saving it here is a separate entry.
+    case savedOnOtherRadio(devices: [String])
+}
+
+extension WifiScanResult {
+    func savedMatch(in uplinks: [TravelmateUplink]) -> SavedNetworkMatch {
+        let sameSsid = uplinks.filter { $0.ssid == ssid }
+        let here = sameSsid.filter { $0.device == device }
+        if let uplink = here.first(where: { $0.enabled }) ?? here.first {
+            return .saved(uplink)
+        }
+        let others = Set(sameSsid.map { $0.device }).sorted()
+        return others.isEmpty ? .notSaved : .savedOnOtherRadio(devices: others)
+    }
+}
+
+/// Pure lookups over raw `uci get` results. Travelmate links a saved uplink to
+/// its `wifi-iface` by radio + SSID + optional BSSID (`f_getcfg`), so adding,
+/// reconnecting and forgetting a network must pick sections the same way.
+enum TravelmateConfig {
+    /// Name prefix of the STA ifaces travelmate and this app create.
+    static let staPrefix = "trm_uplink"
+
+    /// Sections of one uci config in file order (`.index`), by name when the
+    /// router doesn't report an index.
+    static func orderedSections(_ config: JSONValue) -> [(name: String, section: JSONValue)] {
+        (config.objectValue ?? [:])
+            .map { (name: $0.key, section: $0.value) }
+            .sorted { lhs, rhs in
+                let l = lhs.section[".index"].intValue ?? Int.max
+                let r = rhs.section[".index"].intValue ?? Int.max
+                return l == r ? lhs.name < rhs.name : l < r
+            }
+    }
+
+    static func normalizedBSSID(_ bssid: String) -> String {
+        bssid.trimmingCharacters(in: .whitespaces).uppercased()
+    }
+
+    private static func isMatch(
+        _ section: JSONValue, type: String, mode: String? = nil, ssid: String, device: String
+    ) -> Bool {
+        guard section[".type"].stringValue == type else { return false }
+        if let mode, section["mode"].coercedString != mode { return false }
+        guard section["ssid"].coercedString == ssid else { return false }
+        return section["device"].coercedString == device
+    }
+
+    /// `mode=sta` wifi-iface sections of one saved network, best candidate
+    /// first: the one whose BSSID pin equals the uplink's (what travelmate
+    /// links), then sections travelmate named itself, then file order.
+    static func staSections(
+        in wireless: JSONValue, ssid: String, device: String, bssid: String = ""
+    ) -> [String] {
+        let pin = normalizedBSSID(bssid)
+        let candidates = orderedSections(wireless).filter { entry in
+            isMatch(entry.section, type: "wifi-iface", mode: "sta", ssid: ssid, device: device)
+        }
+        return candidates.enumerated()
+            .map { offset, entry -> (rank: Int, offset: Int, name: String) in
+                let samePin =
+                    normalizedBSSID(entry.section["bssid"].coercedString ?? "") == pin
+                let rank = (samePin ? 0 : 2) + (entry.name.hasPrefix(staPrefix) ? 0 : 1)
+                return (rank, offset, entry.name)
+            }
+            .sorted { ($0.rank, $0.offset) < ($1.rank, $1.offset) }
+            .map { $0.name }
+    }
+
+    /// The travelmate `uplink` section for a network. With several matching,
+    /// the first in file order is the one travelmate applies.
+    static func uplinkSection(in travelmate: JSONValue, ssid: String, device: String) -> String? {
+        orderedSections(travelmate).first(where: { entry in
+            isMatch(entry.section, type: "uplink", ssid: ssid, device: device)
+        })?.name
+    }
+
+    /// First unused `trm_uplinkN` section name.
+    static func nextStaSectionName(in wireless: JSONValue) -> String {
+        var maxIndex = 0
+        for name in (wireless.objectValue ?? [:]).keys where name.hasPrefix(staPrefix) {
+            if let n = Int(name.dropFirst(staPrefix.count)) { maxIndex = max(maxIndex, n) }
+        }
+        return "\(staPrefix)\(maxIndex + 1)"
     }
 }
 

@@ -419,11 +419,11 @@ private struct ForwardFormSheet: View {
     ) {
         self.title = title
         self.onSave = onSave
-        _name = State(initialValue: forward?.name ?? "")
-        _proto = State(initialValue: ForwardProtocol(uciValue: forward?.proto ?? "tcp"))
-        _srcDPort = State(initialValue: forward?.srcDPort ?? "")
-        _destIP = State(initialValue: forward?.destIP ?? "")
-        _destPort = State(initialValue: forward?.destPort ?? "")
+        self.name = forward?.name ?? ""
+        self.proto = ForwardProtocol(uciValue: forward?.proto ?? "tcp")
+        self.srcDPort = forward?.srcDPort ?? ""
+        self.destIP = forward?.destIP ?? ""
+        self.destPort = forward?.destPort ?? ""
     }
 
     var body: some View {

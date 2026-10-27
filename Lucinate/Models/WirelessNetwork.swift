@@ -70,6 +70,18 @@ struct WirelessNetwork: Sendable, Identifiable, Equatable {
     /// "Broadcast" (AP the router transmits) or "Uplink" (STA it repeats).
     var roleLabel: String { isUplink ? "Uplink" : "Broadcast" }
 
+    /// An AP this router transmits. Only these have clients: a STA's
+    /// association list is the upstream hotel access point. An unset uci mode
+    /// means ap, and iwinfo (the fallback source of `mode`) spells it "master".
+    var isBroadcast: Bool { mode == "ap" || mode == "master" || mode.isEmpty }
+
+    /// Kernel ifnames of the broadcast APs, sorted and de-duplicated: the only
+    /// devices worth an `iwinfo assoclist` call. Uplinks and entries without
+    /// an ifname are left out.
+    static func broadcastDevices(in networks: [WirelessNetwork]) -> [String] {
+        Set(networks.filter(\.isBroadcast).map(\.device).filter { !$0.isEmpty }).sorted()
+    }
+
     /// Parses the full luci-rpc `getWirelessDevices` payload: an object keyed
     /// by radio name ("radio0", ...), each with a `config` object and an
     /// `interfaces[]` array (entries carrying `ifname`, `section`, `config`

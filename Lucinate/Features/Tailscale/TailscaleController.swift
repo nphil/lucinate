@@ -10,17 +10,27 @@ import Observation
 final class TailscaleController {
     private(set) var status: TailscaleStatus = .empty
     private(set) var settings: TailscaleSettings = .empty
+
+    /// The router has given a definitive answer: a status payload, or proof
+    /// that the plugin is absent. A failed call never sets it, so an error
+    /// can not pass for a state.
     private(set) var loaded = false
     private(set) var isLoading = false
 
     /// A write (`set_settings`) is in flight — used to disable toggles.
     private(set) var isBusy = false
-    private(set) var error: String?
 
-    /// The `tailscale` rpcd object is absent (plugin not installed on the
-    /// router) or the daemon reports `not_installed`. Drives the empty state
-    /// instead of an error — this is expected on most routers.
-    private(set) var notInstalled = false
+    /// Why the last `load` failed; nil after a successful one. Before the
+    /// first answer it drives the error screen, afterwards an inline notice
+    /// over the last known data.
+    private(set) var loadError: String?
+
+    /// Why the last write failed (for toasts); cleared when the next starts.
+    private(set) var actionError: String?
+
+    /// Tailscale is definitively absent: the plugin reported `not_installed`
+    /// or the `tailscale` ubus object is not registered.
+    var isNotInstalled: Bool { loaded && status.state == .notInstalled }
 
     /// Forget everything (used when the selected router changes).
     func reset() {
@@ -29,13 +39,12 @@ final class TailscaleController {
         loaded = false
         isLoading = false
         isBusy = false
-        error = nil
-        notInstalled = false
+        loadError = nil
+        actionError = nil
     }
 
     func load(service: RouterService) async {
         isLoading = true
-        error = nil
         defer { isLoading = false }
         do {
             async let statusCall = service.tailscaleStatus()
@@ -43,36 +52,51 @@ final class TailscaleController {
             let (statusJSON, settingsJSON) = try await (statusCall, settingsCall)
             status = TailscaleStatus.fromJSON(statusJSON)
             settings = TailscaleSettings.fromJSON(settingsJSON)
-            notInstalled = !status.isInstalled
             loaded = true
-        } catch let ubusError as UbusError where ubusError.isUnavailableObject {
-            // The optional tailscale rpcd plugin isn't there — degrade to the
-            // "not installed" empty state rather than an error.
-            notInstalled = true
-            loaded = true
+            loadError = nil
         } catch is CancellationError {
             // View went away mid-load; keep whatever state we had.
+        } catch let ubusError as UbusError where ubusError.isUnavailableObject {
+            // Object missing or access refused: only the router's object
+            // list can tell the two apart.
+            let objects = try? await service.ubusObjects()
+            if Self.isPluginAbsent(objects: objects) {
+                status = .notInstalled
+                settings = .empty
+                loaded = true
+                loadError = nil
+            } else if !Task.isCancelled {
+                loadError = ubusError.localizedDescription
+            }
         } catch {
             if !Task.isCancelled {
-                self.error = error.localizedDescription
+                loadError = error.localizedDescription
             }
         }
     }
 
+    /// `list` needs no session, so it separates "the plugin isn't installed"
+    /// from a router or session that is misbehaving. A failed or empty list is
+    /// a broken reply, not proof of absence.
+    nonisolated static func isPluginAbsent(objects: [String]?) -> Bool {
+        guard let objects, !objects.isEmpty else { return false }
+        return !objects.contains("tailscale")
+    }
+
     private func apply(formData: [String: JSONValue], service: RouterService) async -> Bool {
         isBusy = true
-        error = nil
+        actionError = nil
         defer { isBusy = false }
         do {
             let result = try await service.tailscaleApply(formData: formData)
             if !result["error"].isNull {
-                error = result["error"].coercedString ?? "Action failed"
+                actionError = result["error"].coercedString ?? "Action failed"
                 return false
             }
             await load(service: service)
             return true
         } catch {
-            self.error = error.localizedDescription
+            actionError = error.localizedDescription
             return false
         }
     }

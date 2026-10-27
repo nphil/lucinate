@@ -164,6 +164,17 @@ actor MockUbusClient: UbusCalling {
         }
     }
 
+    /// The objects `call` serves, as the router's JSON-RPC `list` reports them.
+    private static let objectNames = [
+        "file", "iwinfo", "luci", "luci-rpc", "luci.wireguard", "network.interface",
+        "session", "system", "tailscale", "uci",
+    ]
+
+    func listObjects() async throws -> [String] {
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        return Self.objectNames
+    }
+
     func cgiExec(command: String, params: [String], timeout: TimeInterval) async throws -> Data {
         try? await Task.sleep(nanoseconds: 300_000_000)
         guard command == "/usr/libexec/package-manager-call" else {

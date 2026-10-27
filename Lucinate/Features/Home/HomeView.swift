@@ -6,6 +6,7 @@ import SwiftUI
 /// with the Flutter dashboard screen.
 struct HomeView: View {
     @Environment(AppState.self) private var appState
+    @Environment(CaptivePortalMonitor.self) private var portal
     @Environment(\.theme) private var theme
 
     @State private var controller = DashboardController()
@@ -30,6 +31,9 @@ struct HomeView: View {
         }
         .onChange(of: appState.selectedRouterID) { _, newID in
             controller.loadPrefs(routerID: newID)
+            Task { await reload() }
+        }
+        .onChange(of: appState.resumeCount) {
             Task { await reload() }
         }
         .onReceive(
@@ -59,6 +63,11 @@ struct HomeView: View {
                 Task { await reload() }
             }
         } else {
+            // The banner is empty when no sign-in is pending; skip it then so
+            // the stack does not add spacing for an empty child.
+            if portal.needsSignIn {
+                CaptivePortalBanner()
+            }
             hostnameHero
             // Isolated in its own view so the 2s throughput tick only
             // re-renders the hero, not the whole dashboard body.
@@ -228,7 +237,9 @@ struct HomeView: View {
                 if network.disabled {
                     chip("Disabled", color: theme.textSecondary)
                 } else {
-                    if let signal = network.signal {
+                    // An AP's own iwinfo signal means nothing to the owner;
+                    // only the uplink's (the hotel Wi-Fi) does.
+                    if network.isUplink, let signal = network.signal {
                         chip("\(signal) dBm", color: theme.accent)
                     }
                     if let channel = network.channel {
@@ -271,14 +282,14 @@ struct HomeView: View {
             appState.openInterface(named: iface.name)
         } label: {
             HStack(spacing: Spacing.sm) {
-                Image(systemName: Self.interfaceIcon(for: iface))
+                Image(systemName: iface.systemImage)
                     .foregroundStyle(theme.accent)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(iface.name)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(theme.textPrimary)
                         .lineLimit(1)
-                    Text(iface.protocolName)
+                    Text(iface.typeLabel)
                         .font(.caption)
                         .foregroundStyle(theme.textSecondary)
                         .lineLimit(1)
@@ -296,16 +307,6 @@ struct HomeView: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
-    }
-
-    private static func interfaceIcon(for iface: NetworkInterface) -> String {
-        switch iface.protocolName.lowercased() {
-        case "wireguard", "tailscale": return "lock.shield"
-        case "pppoe": return "phone.connection"
-        case "dhcp", "static": return "cable.connector"
-        case "wwan": return "antenna.radiowaves.left.and.right"
-        default: return "network"
-        }
     }
 
     // MARK: - Shared bits

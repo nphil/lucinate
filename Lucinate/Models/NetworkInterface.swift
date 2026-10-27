@@ -68,6 +68,70 @@ struct NetworkInterface: Sendable, Identifiable, Equatable {
         return parts.joined(separator: " ")
     }
 
+    // MARK: - Type
+
+    /// What an interface is for. Derived from the uci `proto`, plus the device
+    /// for Tailscale: netifd only knows it as `proto none` on `tailscale0`.
+    enum Kind: Sendable, Equatable {
+        case tailscale
+        case wireguard
+        /// `proto none` (or no proto): a valid interface netifd does not manage.
+        case unmanaged
+        case dhcp
+        case dhcpv6
+        case staticAddress
+        case pppoe
+        case cellular
+        case other
+    }
+
+    var kind: Kind {
+        let proto = protocolName.lowercased()
+        if proto.isEmpty || proto == "none" {
+            let isTailscale =
+                device.lowercased() == "tailscale0" || name.lowercased().contains("tailscale")
+            return isTailscale ? .tailscale : .unmanaged
+        }
+        switch proto {
+        case "wireguard": return .wireguard
+        case "dhcp": return .dhcp
+        case "dhcpv6": return .dhcpv6
+        case "static": return .staticAddress
+        case "pppoe": return .pppoe
+        case "qmi", "mbim", "ncm", "3g", "modemmanager": return .cellular
+        default: return .other
+        }
+    }
+
+    /// Friendly name of the interface type, shown instead of the raw proto.
+    var typeLabel: String {
+        switch kind {
+        case .tailscale: return "Tailscale VPN"
+        case .unmanaged: return "Unmanaged"
+        case .wireguard: return "WireGuard"
+        case .dhcp: return "DHCP"
+        case .dhcpv6: return "DHCPv6"
+        case .staticAddress: return "Static"
+        case .pppoe: return "PPPoE"
+        case .cellular:
+            return protocolName.lowercased() == "modemmanager"
+                ? "Cellular (ModemManager)"
+                : "Cellular (\(protocolName.uppercased()))"
+        case .other: return protocolName.capitalized
+        }
+    }
+
+    /// SF Symbol for the interface type.
+    var systemImage: String {
+        switch kind {
+        case .tailscale, .wireguard: return "lock.shield"
+        case .pppoe: return "phone.connection"
+        case .cellular: return "antenna.radiowaves.left.and.right"
+        case .dhcp, .dhcpv6, .staticAddress: return "cable.connector"
+        case .unmanaged, .other: return "network"
+        }
+    }
+
     /// Parses one entry of `network.interface dump`'s `interface[]` array.
     static func fromDump(_ iface: JSONValue) -> NetworkInterface {
         // First ipv4-address entry, if any.

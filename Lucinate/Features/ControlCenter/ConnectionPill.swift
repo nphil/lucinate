@@ -11,13 +11,20 @@ struct ConnectionPill: View {
         appState.service != nil && !appState.isRebooting
     }
 
+    /// Connected, but the router has stopped answering (Wi-Fi roaming, web
+    /// server restarting). Stale rates would mislead, so say so instead.
+    private var isReconnecting: Bool {
+        isConnected && !appState.linkHealthy
+    }
+
+    private var dotColor: Color {
+        if appState.isRebooting || isReconnecting { return theme.warning }
+        return isConnected ? theme.success : theme.error
+    }
+
     var body: some View {
         HStack(spacing: Spacing.sm) {
-            StatusDot(
-                color: appState.isRebooting
-                    ? theme.warning : (isConnected ? theme.success : theme.error),
-                glows: true
-            )
+            StatusDot(color: dotColor, glows: true)
             Text(appState.hostname)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(theme.textPrimary)
@@ -25,25 +32,37 @@ struct ConnectionPill: View {
 
             Spacer(minLength: Spacing.sm)
 
-            if placement != .inline {
+            if isReconnecting {
+                HStack(spacing: 4) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text("Reconnecting…")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
+                }
+            } else {
+                if placement != .inline {
+                    ThroughputBadge(
+                        symbol: "arrow.down",
+                        color: theme.success,
+                        text: ThroughputCalculator.formatRate(
+                            bytesPerSecond: appState.throughput.currentRx)
+                    )
+                }
                 ThroughputBadge(
-                    symbol: "arrow.down",
-                    color: theme.success,
+                    symbol: "arrow.up",
+                    color: theme.info,
                     text: ThroughputCalculator.formatRate(
-                        bytesPerSecond: appState.throughput.currentRx)
+                        bytesPerSecond: appState.throughput.currentTx)
                 )
             }
-            ThroughputBadge(
-                symbol: "arrow.up",
-                color: theme.info,
-                text: ThroughputCalculator.formatRate(
-                    bytesPerSecond: appState.throughput.currentTx)
-            )
         }
         .padding(.horizontal, Spacing.md)
         .contentShape(.rect)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Connection status for \(appState.hostname)")
+        .accessibilityValue(isReconnecting ? "Reconnecting" : "")
     }
 }
 

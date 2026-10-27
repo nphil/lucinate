@@ -1,21 +1,31 @@
 import Foundation
 import Observation
 
-/// Path of travelmate's live runtime status file on the router.
-private let travelmateStatusFile = "/var/run/travelmate/travelmate.runtime.json"
-
 /// Networks weaker than this are too flaky to repeat, so we hide them.
 private let minSignalDbm = -80
 
-// MARK: - Tolerant fetch helpers (free functions so `async let` runs them
+/// A restart empties travelmate's status file until its first status write a
+/// few seconds later; within this window an empty file reads as "connecting"
+/// instead of flashing "Not connected".
+private let restartGrace: Duration = .seconds(20)
+
+// MARK: - Fetch helpers (free functions so `async let` runs them
 // concurrently off the main actor).
 
-private func tolerantFileRead(_ service: RouterService, path: String) async -> String {
-    (try? await service.fileRead(path: path)) ?? ""
+/// nil means the read failed. A missing file is a legitimately empty status:
+/// travelmate hasn't run yet, or was stopped.
+private func readRuntime(_ service: RouterService) async -> String? {
+    do {
+        return try await service.fileRead(path: TravelmateStatus.runtimeFilePath)
+    } catch let error as UbusError where error.isNotFound {
+        return ""
+    } catch {
+        return nil
+    }
 }
 
-private func tolerantUciGet(_ service: RouterService, config: String) async -> JSONValue {
-    (try? await service.uciGet(config: config)) ?? .null
+private func readWireless(_ service: RouterService) async -> JSONValue? {
+    try? await service.uciGet(config: "wireless")
 }
 
 private func tolerantScan(_ service: RouterService, radio: String) async -> [JSONValue] {
@@ -40,6 +50,30 @@ final class TravelmateController {
     private(set) var isBusy = false
     private(set) var isScanning = false
     private(set) var error: String?
+
+    /// `/etc/config/travelmate` doesn't exist: the package isn't installed.
+    private(set) var notInstalled = false
+
+    /// The latest attempt to read live data failed. The last good data stays on
+    /// screen and the next poll retries in full.
+    private(set) var refreshFailed = false
+
+    /// When this controller last restarted travelmate.
+    @ObservationIgnored private var restartedAt: ContinuousClock.Instant?
+
+    /// Forget everything (used when the selected router changes).
+    func reset() {
+        status = .empty
+        uplinks = []
+        broadcast = []
+        scanResults = []
+        radioBands = [:]
+        loaded = false
+        error = nil
+        notInstalled = false
+        refreshFailed = false
+        restartedAt = nil
+    }
 
     /// Friendly band label for a wifi device (`radio0` -> `2.4 GHz`), falling
     /// back to the raw device name when the band can't be determined.
@@ -90,24 +124,16 @@ final class TravelmateController {
     func load(service: RouterService) async {
         isLoading = true
         error = nil
+        defer { isLoading = false }
 
         async let travelmateValues = service.uciGet(config: "travelmate")
-        async let runtimeRaw = tolerantFileRead(service, path: travelmateStatusFile)
-        async let wirelessValues = tolerantUciGet(service, config: "wireless")
+        async let runtimeRaw = readRuntime(service)
+        async let wirelessValues = readWireless(service)
 
         do {
             let travelmate = try await travelmateValues
             let runtime = await runtimeRaw
             let wireless = await wirelessValues
-
-            // --- radio -> band map (so we can show 2.4/5 GHz, not radio0/radio1) ---
-            var bands: [String: Int] = [:]
-            for (name, section) in wireless.objectValue ?? [:] {
-                if section[".type"].stringValue == "wifi-device" {
-                    bands[name] = Self.bandOf(section)
-                }
-            }
-            radioBands = bands
 
             // --- travelmate config: global + uplinks ---
             var enabled = false
@@ -127,18 +153,86 @@ final class TravelmateController {
                 $0.ssid == $1.ssid ? $0.sectionId < $1.sectionId : $0.ssid < $1.ssid
             }
 
-            // --- live status from runtime.json ---
-            status = TravelmateStatus.fromRuntime(runtime, enabled: enabled)
+            // --- live status from runtime.json; a failed read keeps the last status ---
+            status =
+                runtime.map { parseStatus($0, enabled: enabled) }
+                ?? status.withEnabled(enabled)
 
-            // --- broadcast radios (the router's own AP that devices join) ---
-            broadcast = Self.parseBroadcast(
-                wireless: wireless, bands: bands, activeDevice: status.activeDevice)
+            // --- radio -> band map (so we can show 2.4/5 GHz, not radio0/radio1)
+            // and the router's own broadcast Wi-Fi; a failed read keeps the last ones ---
+            if let wireless {
+                var bands: [String: Int] = [:]
+                for (name, section) in wireless.objectValue ?? [:] {
+                    if section[".type"].stringValue == "wifi-device" {
+                        bands[name] = Self.bandOf(section)
+                    }
+                }
+                radioBands = bands
+                broadcast = Self.parseBroadcast(
+                    wireless: wireless, bands: bands, activeDevice: status.activeDevice)
+            }
 
             loaded = true
+            notInstalled = false
+            refreshFailed = runtime == nil || wireless == nil
         } catch {
-            self.error = error.localizedDescription
+            // The view went away (tab switch, router change) mid-load.
+            if Task.isCancelled || error is CancellationError { return }
+
+            if loaded {
+                // Keep what's on screen; the poll retries. A "not found" here
+                // can be rpcd restarting, so it doesn't prove an uninstall.
+                refreshFailed = true
+            } else if let ubusError = error as? UbusError, ubusError.isNotFound {
+                // Nothing was ever loaded and `uci get travelmate` reports
+                // "not found": there is no /etc/config/travelmate.
+                notInstalled = true
+            } else {
+                notInstalled = false
+                self.error = error.localizedDescription
+            }
         }
-        isLoading = false
+    }
+
+    /// One tick of the live poll: re-reads only travelmate's status file, so
+    /// connecting / sign-in / online transitions show up as they happen. A
+    /// change of connection also reloads the saved list, which is where a
+    /// network travelmate just gave up on turns up as paused. After a failed
+    /// read the next tick reloads everything instead.
+    func refreshStatus(service: RouterService) async {
+        guard loaded, !isLoading, !isBusy, !isScanning else { return }
+        if refreshFailed {
+            await load(service: service)
+            return
+        }
+        let raw = await readRuntime(service)
+        // The tab may have gone away, or a load or change may have started,
+        // while the read was in flight.
+        guard !Task.isCancelled, !isLoading, !isBusy else { return }
+        guard let raw else {
+            refreshFailed = true
+            return
+        }
+        let previous = status
+        let fresh = parseStatus(raw, enabled: previous.enabled)
+        if fresh != previous { status = fresh }
+        if !fresh.hasSameConnection(as: previous) {
+            await load(service: service)
+        }
+    }
+
+    private func parseStatus(_ raw: String, enabled: Bool) -> TravelmateStatus {
+        let parsed = TravelmateStatus.fromRuntime(raw, enabled: enabled)
+        if enabled, parsed.statusText.isEmpty, let restartedAt,
+            ContinuousClock.now - restartedAt < restartGrace
+        {
+            return .processing(enabled: true)
+        }
+        return parsed
+    }
+
+    private func noteRestart() {
+        restartedAt = ContinuousClock.now
     }
 
     /// Best-effort band (2/5/6) for a `wifi-device` uci section.
@@ -225,19 +319,13 @@ final class TravelmateController {
     @discardableResult
     func setEnabled(_ value: Bool, service: RouterService) async -> Bool {
         let previous = status
-        status = TravelmateStatus(
-            enabled: value,
-            statusText: previous.statusText,
-            activeSsid: previous.activeSsid,
-            activeDevice: previous.activeDevice,
-            captive: previous.captive,
-            subnet: previous.subnet
-        )
+        status = previous.withEnabled(value)
         isBusy = true
         error = nil
         defer { isBusy = false }
         do {
             try await service.setTravelmateEnabled(value)
+            noteRestart()
             await load(service: service)
             return true
         } catch {
@@ -290,6 +378,11 @@ final class TravelmateController {
 
     // MARK: - Uplinks
 
+    /// How a scanned network relates to the saved ones.
+    func savedMatch(for scan: WifiScanResult) -> SavedNetworkMatch {
+        scan.savedMatch(in: uplinks)
+    }
+
     /// Forget a saved uplink. Optimistically drops the row so it doesn't
     /// linger; a reload reconciles either way.
     @discardableResult
@@ -301,6 +394,7 @@ final class TravelmateController {
         do {
             try await service.removeTravelmateUplink(
                 ssid: uplink.ssid, device: uplink.device, uplinkSection: uplink.sectionId)
+            noteRestart()
             await load(service: service)
             return true
         } catch {
@@ -310,7 +404,9 @@ final class TravelmateController {
         }
     }
 
-    /// Add a new uplink (STA iface + travelmate uplink section), then reload.
+    /// Save a network (STA iface + travelmate uplink), then reload. A network
+    /// that is already saved is re-enabled instead of duplicated; a non-empty
+    /// `password` replaces its stored key.
     @discardableResult
     func addUplink(
         ssid: String, password: String, device: String, encryption: String,
@@ -322,6 +418,25 @@ final class TravelmateController {
         do {
             try await service.addTravelmateUplink(
                 ssid: ssid, password: password, device: device, encryption: encryption)
+            noteRestart()
+            await load(service: service)
+            return true
+        } catch {
+            self.error = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Resume an uplink travelmate paused after repeated failed connects and
+    /// let it retry right away.
+    @discardableResult
+    func reconnect(_ uplink: TravelmateUplink, service: RouterService) async -> Bool {
+        isBusy = true
+        error = nil
+        defer { isBusy = false }
+        do {
+            try await service.reconnectTravelmateUplink(section: uplink.sectionId)
+            noteRestart()
             await load(service: service)
             return true
         } catch {
@@ -343,15 +458,16 @@ final class TravelmateController {
         isBusy = true
         error = nil
         defer { isBusy = false }
-        do {
-            for radio in broadcast where !radio.apSection.isEmpty {
-                try await service.uciSet(
-                    config: "wireless",
+        let changes: [(section: String, values: [String: String])] = broadcast
+            .filter { !$0.apSection.isEmpty }
+            .map { radio in
+                (
                     section: radio.apSection,
-                    values: ["disabled": enabledDevices.contains(radio.device) ? "0" : "1"])
+                    values: ["disabled": enabledDevices.contains(radio.device) ? "0" : "1"]
+                )
             }
-            try await service.uciCommit(config: "wireless")
-            try await service.wifiReload()
+        do {
+            try await service.updateWireless(changes: changes)
             await load(service: service)
             return true
         } catch {
@@ -362,13 +478,18 @@ final class TravelmateController {
 
     /// Update a broadcast radio's AP identity (the network your devices
     /// join): SSID, optionally the password (nil/empty = keep current), and
-    /// optionally the hidden flag (nil = unchanged). One commit + wifi reload.
+    /// optionally the hidden flag (nil = unchanged). `radio` (a wifi-device
+    /// such as `radio1`) with `channel` ("auto" or a number) sets the channel
+    /// in the same change. Everything lands in one commit and one wifi
+    /// reload; a second request after the reload would fail or lose its reply
+    /// because the reload restarts the phone's own Wi-Fi.
     /// Using the same name on both bands lets clients band-steer
     /// automatically; different names pin a device to 2.4 or 5 GHz.
     @discardableResult
     func updateBroadcast(
         section: String, ssid: String, password: String?, hidden: Bool?,
         encryption: String? = nil,
+        radio: String? = nil, channel: String? = nil,
         service: RouterService
     ) async -> Bool {
         let trimmed = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -391,11 +512,17 @@ final class TravelmateController {
         if let hidden {
             values["hidden"] = hidden ? "1" : "0"
         }
+        var changes: [(section: String, values: [String: String])] = [
+            (section: section, values: values)
+        ]
+        if let radio, let channel, !radio.isEmpty, !channel.isEmpty {
+            changes.append((section: radio, values: ["channel": channel]))
+        }
         isBusy = true
         error = nil
         defer { isBusy = false }
         do {
-            try await service.updateWireless(section: section, values: values)
+            try await service.updateWireless(changes: changes)
             await load(service: service)
             return true
         } catch {

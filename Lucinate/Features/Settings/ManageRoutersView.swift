@@ -206,10 +206,10 @@ private struct RouterFormView: View {
 
     init(existing: Router?) {
         self.existing = existing
-        _address = State(initialValue: existing?.ipAddress ?? "")
-        _username = State(initialValue: existing?.username ?? "root")
-        _password = State(initialValue: existing?.password ?? "")
-        _useHttps = State(initialValue: existing?.useHttps ?? false)
+        self.address = existing?.ipAddress ?? ""
+        self.username = existing?.username ?? "root"
+        self.password = existing?.password ?? ""
+        self.useHttps = existing?.useHttps ?? false
     }
 
     private var trimmedAddress: String {
@@ -294,13 +294,9 @@ private struct RouterFormView: View {
                 )
                 appState.updateRouter(updated)
             } else {
-                // Identity changed: make sure the new id is free before
-                // dropping the old entry, so a failed save loses nothing.
-                if appState.routers.contains(where: { $0.id == newID }) {
-                    errorMessage = "This router is already saved"
-                    Haptics.error()
-                    return
-                }
+                // Replaced in place so the entry keeps its position, stays the
+                // active router if it was, and keeps its accepted certificate
+                // unless host:port changed. Nothing is lost when the new id is taken.
                 let replacement = Router(
                     id: newID,
                     ipAddress: trimmedAddress,
@@ -309,8 +305,7 @@ private struct RouterFormView: View {
                     useHttps: useHttps,
                     lastKnownHostname: nil
                 )
-                appState.removeRouter(id: existing.id)
-                guard appState.addRouter(replacement) else {
+                guard appState.replaceRouter(id: existing.id, with: replacement) else {
                     errorMessage = "This router is already saved"
                     Haptics.error()
                     return

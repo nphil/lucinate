@@ -5,6 +5,7 @@ import UIKit
 /// flags, and the peer list. Mirrors `lib/screens/tailscale_screen.dart`.
 struct TailscaleView: View {
     @Environment(AppState.self) private var appState
+    @Environment(CaptivePortalMonitor.self) private var portal
     @Environment(\.theme) private var theme
 
     @State private var controller = TailscaleController()
@@ -14,25 +15,11 @@ struct TailscaleView: View {
 
     var body: some View {
         ScrollView {
-            if controller.notInstalled {
-                EmptyStateView(
-                    systemImage: "lock.shield",
-                    title: "Tailscale Not Available",
-                    message:
-                        "Install the Tailscale package and LuCI app on the router to manage it here."
-                )
-                .containerRelativeFrame(.vertical)
-            } else if !controller.loaded, let error = controller.error {
-                ErrorStateView(message: error) {
-                    Task { await reload() }
-                }
-                .containerRelativeFrame(.vertical)
-            } else if !controller.loaded {
-                loadingSkeleton
-            } else {
-                content
-            }
+            screen
         }
+        // Short states (needs login, waiting for the portal) would not
+        // overscroll otherwise, and pull-to-refresh needs the bounce.
+        .scrollBounceBehavior(.always, axes: .vertical)
         .background(theme.background)
         .navigationTitle("Tailscale")
         .refreshable {
@@ -45,6 +32,9 @@ struct TailscaleView: View {
                 controller.reset()
             }
             await reload()
+        }
+        .onChange(of: appState.resumeCount) {
+            Task { await reload() }
         }
         .alert("Enable MagicDNS?", isPresented: $showMagicDnsConfirm) {
             Button("Cancel", role: .cancel) {}
@@ -87,7 +77,7 @@ struct TailscaleView: View {
             let ok = await controller.setFlag(key, value: value, service: service)
             if !ok {
                 Haptics.error()
-                appState.showToast(controller.error ?? "Action failed")
+                appState.showToast(controller.actionError ?? "Action failed")
             }
         }
     }
@@ -99,26 +89,69 @@ struct TailscaleView: View {
             let ok = await controller.setExitNode(ip: ip, service: service)
             if !ok {
                 Haptics.error()
-                appState.showToast(controller.error ?? "Action failed")
+                appState.showToast(controller.actionError ?? "Action failed")
             }
         }
     }
 
     // MARK: - Content
 
-    private var content: some View {
-        VStack(alignment: .leading, spacing: Spacing.sm) {
-            statusCard
-            sectionHeader("Routing")
-            routingCard
-            sectionHeader("DNS & Security")
-            dnsSecurityCard
-            if !controller.status.peers.isEmpty {
-                sectionHeader("Peers")
-                peersCard
+    /// Only a definitive answer picks a state; a failed call is shown as an
+    /// error (or an inline notice over the last data), never as "not installed".
+    @ViewBuilder
+    private var screen: some View {
+        if !controller.loaded {
+            if let error = controller.loadError {
+                ErrorStateView(message: error) {
+                    Task { await reload() }
+                }
+                .containerRelativeFrame(.vertical)
+            } else {
+                loadingSkeleton
+            }
+        } else {
+            switch controller.status.state {
+            case .notInstalled:
+                EmptyStateView(
+                    systemImage: "lock.shield",
+                    title: "Tailscale Isn't Installed",
+                    message:
+                        "Install the Tailscale package and LuCI app on the router to manage it here."
+                )
+                .containerRelativeFrame(.vertical)
+            case .needsLogin:
+                stateContent { needsLoginCard }
+            case .notConnected:
+                stateContent { notConnectedCards }
+            case .running:
+                stateContent { runningCards }
             }
         }
+    }
+
+    /// Frame shared by the loaded states: an inline notice when the latest
+    /// refresh failed (the last known data stays on screen), then the cards.
+    private func stateContent<Cards: View>(@ViewBuilder _ cards: () -> Cards) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            if let message = controller.loadError {
+                refreshNotice(message)
+            }
+            cards()
+        }
         .padding(Spacing.md)
+    }
+
+    @ViewBuilder
+    private var runningCards: some View {
+        statusCard
+        sectionHeader("Routing")
+        routingCard
+        sectionHeader("DNS & Security")
+        dnsSecurityCard
+        if !controller.status.peers.isEmpty {
+            sectionHeader("Peers")
+            peersCard
+        }
     }
 
     private var loadingSkeleton: some View {
@@ -144,23 +177,11 @@ struct TailscaleView: View {
 
     private var statusCard: some View {
         let s = controller.status
-        let label: String
-        let color: Color
-        if s.isRunning {
-            label = "Connected"
-            color = theme.success
-        } else if s.needsLogin {
-            label = "Needs Login"
-            color = theme.warning
-        } else {
-            label = "Disconnected"
-            color = theme.error
-        }
         return ElevatedCard {
             VStack(alignment: .leading, spacing: Spacing.md) {
                 HStack(spacing: Spacing.sm) {
-                    StatusDot(color: color, size: 12, glows: s.isRunning)
-                    Text(label)
+                    StatusDot(color: theme.success, size: 12, glows: true)
+                    Text("Connected")
                         .font(.cardTitle)
                         .foregroundStyle(theme.textPrimary)
                     Spacer()
@@ -177,9 +198,121 @@ struct TailscaleView: View {
                     }
                     infoRow("Peers online", "\(s.peersOnline) of \(s.peers.count)")
                     infoRow("Exit node", s.exitNodeName ?? "None")
+                    if let tunMode = s.tunMode {
+                        infoRow("Network mode", tunMode ? "TUN device" : "Userspace")
+                    }
+                }
+                if let health = s.health {
+                    healthNote(health)
                 }
             }
         }
+    }
+
+    // MARK: Needs login / not connected yet
+
+    private var needsLoginCard: some View {
+        ElevatedCard {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                stateHeader("Needs login", color: theme.warning)
+                Text(
+                    "This router isn't signed in to Tailscale yet. Open the router's web page (LuCI) and sign in to Tailscale there."
+                )
+                .font(.subheadline)
+                .foregroundStyle(theme.textSecondary)
+                if let health = controller.status.health {
+                    healthNote(health)
+                }
+                checkAgainButton
+            }
+        }
+    }
+
+    /// The plugin reports an empty status while the daemon is starting or
+    /// cannot reach its servers — expected behind a hotel portal.
+    @ViewBuilder
+    private var notConnectedCards: some View {
+        // The banner is empty when no sign-in is pending; skip it then so the
+        // stack does not add spacing for an empty child.
+        if portal.needsSignIn {
+            CaptivePortalBanner()
+        }
+        ElevatedCard {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                stateHeader("Not connected yet", color: theme.info)
+                Text(
+                    portal.needsSignIn
+                        ? "Tailscale is waiting for the hotel Wi-Fi sign-in. It connects by itself once the router is online."
+                        : "Tailscale is starting or can't reach its servers yet. It connects by itself once the router has internet."
+                )
+                .font(.subheadline)
+                .foregroundStyle(theme.textSecondary)
+                if let health = controller.status.health {
+                    healthNote(health)
+                }
+                checkAgainButton
+            }
+        }
+    }
+
+    private func stateHeader(_ title: String, color: Color) -> some View {
+        HStack(spacing: Spacing.sm) {
+            StatusDot(color: color, size: 12)
+            Text(title)
+                .font(.cardTitle)
+                .foregroundStyle(theme.textPrimary)
+            Spacer()
+        }
+    }
+
+    /// The daemon's own explanation, e.g. why it cannot reach its servers.
+    private func healthNote(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: Spacing.xs) {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(theme.warning)
+            Text(text)
+                .foregroundStyle(theme.textSecondary)
+        }
+        .font(.caption)
+    }
+
+    private var checkAgainButton: some View {
+        Button {
+            Haptics.impact(.light)
+            Task { await reload() }
+        } label: {
+            Text("Check Again")
+        }
+        .buttonStyle(.bordered)
+        .tint(theme.accent)
+        .disabled(controller.isLoading)
+    }
+
+    private func refreshNotice(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: Spacing.sm) {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(theme.warning)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Couldn't refresh Tailscale. Showing the last known status.")
+                    .font(.subheadline)
+                    .foregroundStyle(theme.textPrimary)
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(theme.textSecondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Retry") {
+                Task { await reload() }
+            }
+            .buttonStyle(.bordered)
+            .tint(theme.warning)
+            .disabled(controller.isLoading)
+        }
+        .padding(Spacing.md)
+        .background(
+            theme.warning.opacity(0.15),
+            in: .rect(cornerRadius: CornerRadius.card, style: .continuous)
+        )
     }
 
     private var tailnetIPRow: some View {

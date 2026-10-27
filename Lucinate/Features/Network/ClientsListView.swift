@@ -1,8 +1,8 @@
 import SwiftUI
 import UIKit
 
-/// Clients segment of the Network hub: expandable client cards with an
-/// All Routers / This Router scope switch (parity with clients_screen.dart).
+/// Clients segment of the Network hub: expandable client cards of the active
+/// router (parity with clients_screen.dart).
 struct ClientsListView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
@@ -98,22 +98,19 @@ struct ClientsListView: View {
     }
 
     private func reload() async {
-        await controller.load(service: appState.service, routers: appState.routers)
+        await controller.load(service: appState.service, routerID: appState.selectedRouterID)
     }
 
-    /// Starts live speed polling against the ACTIVE router's wireless
-    /// ifnames. Aggregate-mode clients from other routers simply never get a
-    /// rate published (no badge). Tolerates failures silently.
+    /// Starts live speed polling against the active router's broadcast APs.
+    /// Uplinks are skipped (their assoclist is the upstream hotel AP).
+    /// Tolerates failures silently.
     private func startSpeedPolling() async {
         guard let service = appState.service else { return }
         guard let json = try? await service.wirelessDevices() else { return }
-        let devices = Set(
-            WirelessNetwork.fromWirelessDevices(json)
-                .map(\.device)
-                .filter { !$0.isEmpty }
-        )
+        let devices = WirelessNetwork.broadcastDevices(
+            in: WirelessNetwork.fromWirelessDevices(json))
         guard !devices.isEmpty, !Task.isCancelled else { return }
-        speeds.start(service: service, devices: Array(devices))
+        speeds.start(service: service, devices: devices)
     }
 
     private func toggle(_ id: String) {
@@ -127,12 +124,11 @@ struct ClientsListView: View {
         }
     }
 
-    // MARK: - Client quick actions (selected-router mode only)
+    // MARK: - Client quick actions
 
-    /// In aggregate mode the actions would hit the ACTIVE router, which may
-    /// not be the one the client belongs to — hide them there.
+    /// Actions need a connected router and a MAC to act on.
     private func canAct(on client: Client) -> Bool {
-        !controller.aggregateAll && appState.service != nil && client.macAddress != "N/A"
+        appState.service != nil && client.macAddress != "N/A"
     }
 
     private func wake(_ client: Client) {
@@ -189,7 +185,7 @@ struct ClientsListView: View {
         }
     }
 
-    // MARK: - Header (count + scope switch)
+    // MARK: - Header (count)
 
     private func headerRow(count: Int) -> some View {
         HStack {
@@ -197,39 +193,8 @@ struct ClientsListView: View {
                 .font(.statLabel)
                 .foregroundStyle(theme.textSecondary)
             Spacer()
-            Menu {
-                Picker("Scope", selection: scopeBinding) {
-                    Label("All Routers", systemImage: "building.2").tag(true)
-                    Label("This Router", systemImage: "wifi.router").tag(false)
-                }
-            } label: {
-                HStack(spacing: Spacing.xs) {
-                    Image(systemName: controller.aggregateAll ? "building.2" : "wifi.router")
-                        .font(.caption)
-                    Text(controller.aggregateAll ? "All Routers" : "This Router")
-                        .font(.caption.weight(.medium))
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.caption2)
-                }
-                .foregroundStyle(theme.accent)
-                .padding(.vertical, Spacing.xs)
-                .padding(.horizontal, Spacing.sm)
-                .background(theme.accent.opacity(0.15), in: .capsule)
-            }
         }
         .padding(.horizontal, Spacing.xs)
-    }
-
-    private var scopeBinding: Binding<Bool> {
-        Binding(
-            get: { controller.aggregateAll },
-            set: { newValue in
-                guard newValue != controller.aggregateAll else { return }
-                Haptics.selection()
-                controller.setAggregateAll(newValue)
-                Task { await reload() }
-            }
-        )
     }
 
     // MARK: - Skeletons
@@ -252,7 +217,7 @@ private struct ClientCard: View {
     let speeds: ClientSpeedsController
     let isExpanded: Bool
     let isBlocked: Bool
-    /// False in aggregate (All Routers) mode — quick actions are hidden there.
+    /// False when the router is disconnected or the client has no MAC.
     let canAct: Bool
     let wolAvailable: Bool
     let onToggle: () -> Void

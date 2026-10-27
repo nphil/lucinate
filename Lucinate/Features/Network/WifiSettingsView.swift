@@ -251,17 +251,17 @@ private struct WifiEditorSheet: View {
         self.accessPoint = accessPoint
         self.radio = radio
         self.controller = controller
-        _ssid = State(initialValue: accessPoint.ssid)
-        _hidden = State(initialValue: accessPoint.hidden)
+        self.ssid = accessPoint.ssid
+        self.hidden = accessPoint.hidden
         let rawChannel = radio?.channel ?? "auto"
-        _channel = State(initialValue: rawChannel.isEmpty ? "auto" : rawChannel)
-        _htmode = State(initialValue: radio?.htmode ?? "")
+        self.channel = rawChannel.isEmpty ? "auto" : rawChannel
+        self.htmode = radio?.htmode ?? ""
     }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Network") {
+                Section {
                     TextField("Network Name (SSID)", text: $ssid)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -272,6 +272,13 @@ private struct WifiEditorSheet: View {
                         .onChange(of: hidden) { _, _ in
                             Haptics.selection()
                         }
+                } header: {
+                    Text("Network")
+                } footer: {
+                    if let problem = ssidProblem {
+                        Text(problem)
+                            .foregroundStyle(theme.error)
+                    }
                 }
 
                 passwordSection
@@ -363,7 +370,12 @@ private struct WifiEditorSheet: View {
             } header: {
                 Text("Password")
             } footer: {
-                Text("Leave empty to keep the current password.")
+                if let problem = passwordProblem {
+                    Text(problem)
+                        .foregroundStyle(theme.error)
+                } else {
+                    Text("Leave empty to keep the current password.")
+                }
             }
         }
     }
@@ -471,8 +483,18 @@ private struct WifiEditorSheet: View {
         !ifaceChanges.isEmpty || !radioChanges.isEmpty
     }
 
+    /// Only a name that would actually be written is checked.
+    private var ssidProblem: String? {
+        trimmedSSID == accessPoint.ssid ? nil : WifiCredentialRules.ssidProblem(trimmedSSID)
+    }
+
+    private var passwordProblem: String? {
+        WifiCredentialRules.passphraseProblem(password, encryption: accessPoint.encryption)
+    }
+
     private var canSave: Bool {
-        !trimmedSSID.isEmpty && hasChanges && !isSaving
+        !trimmedSSID.isEmpty && ssidProblem == nil && passwordProblem == nil
+            && hasChanges && !isSaving
     }
 
     // MARK: - Save
@@ -481,17 +503,18 @@ private struct WifiEditorSheet: View {
         isSaving = true
         defer { isSaving = false }
 
-        var ok = true
+        // One batch, so the radio reloads once: a second request would reach a
+        // radio the first reload just restarted (the one the phone is on).
+        var changes: [(section: String, values: [String: String])] = []
         let ifaceValues = ifaceChanges
         if !ifaceValues.isEmpty {
-            ok = await controller.apply(
-                section: accessPoint.section, values: ifaceValues, service: appState.service)
+            changes.append((section: accessPoint.section, values: ifaceValues))
         }
         let radioValues = radioChanges
-        if ok, !radioValues.isEmpty, let radio {
-            ok = await controller.apply(
-                section: radio.section, values: radioValues, service: appState.service)
+        if !radioValues.isEmpty, let radio {
+            changes.append((section: radio.section, values: radioValues))
         }
+        let ok = await controller.apply(changes: changes, service: appState.service)
 
         if ok {
             Haptics.success()

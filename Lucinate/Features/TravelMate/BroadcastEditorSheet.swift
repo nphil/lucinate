@@ -21,8 +21,8 @@ struct BroadcastEditorSheet: View {
     init(controller: TravelmateController, radio: BroadcastRadio) {
         self.controller = controller
         self.radio = radio
-        _name = State(initialValue: radio.ssid)
-        _channel = State(initialValue: radio.channel.isEmpty ? "auto" : radio.channel)
+        self.name = radio.ssid
+        self.channel = radio.channel.isEmpty ? "auto" : radio.channel
     }
 
     var body: some View {
@@ -76,10 +76,15 @@ struct BroadcastEditorSheet: View {
         } header: {
             Text("Network")
         } footer: {
-            Text(
-                "Using the same name on both bands lets devices switch bands "
-                    + "automatically (band steering)."
-            )
+            if let problem = nameProblem {
+                Text(problem)
+                    .foregroundStyle(theme.error)
+            } else {
+                Text(
+                    "Using the same name on both bands lets devices switch bands "
+                        + "automatically (band steering)."
+                )
+            }
         }
     }
 
@@ -111,11 +116,16 @@ struct BroadcastEditorSheet: View {
         } header: {
             Text("Security")
         } footer: {
-            Text(
-                isOpenNetwork
-                    ? "This network is currently open. Setting a password secures it with WPA2/WPA3. Minimum 8 characters."
-                    : "Leave blank to keep the current password. Minimum 8 characters."
-            )
+            if let problem = passwordProblem {
+                Text(problem)
+                    .foregroundStyle(theme.error)
+            } else {
+                Text(
+                    isOpenNetwork
+                        ? "This network is currently open. Setting a password secures it with WPA2/WPA3. Use 8 to 63 characters."
+                        : "Leave blank to keep the current password. Use 8 to 63 characters."
+                )
+            }
         }
     }
 
@@ -190,8 +200,25 @@ struct BroadcastEditorSheet: View {
         !radio.uplinkLocked && channel != (radio.channel.isEmpty ? "auto" : radio.channel)
     }
 
+    /// What the AP's encryption will be once saved: a password on an open
+    /// network secures it as WPA2/WPA3 mixed (see `save`).
+    private var resultingEncryption: String {
+        isOpenNetwork ? "sae-mixed" : radio.encryption
+    }
+
+    /// Only a name that would actually be written is checked.
+    private var nameProblem: String? {
+        nameChanged ? WifiCredentialRules.ssidProblem(trimmedName) : nil
+    }
+
+    private var passwordProblem: String? {
+        WifiCredentialRules.passphraseProblem(password, encryption: resultingEncryption)
+    }
+
     private var canSave: Bool {
         !trimmedName.isEmpty
+            && nameProblem == nil
+            && passwordProblem == nil
             && (nameChanged || passwordChanged || channelChanged)
             && !controller.isBusy
     }
@@ -201,23 +228,20 @@ struct BroadcastEditorSheet: View {
     private func save() async {
         guard let service = appState.service else { return }
 
-        var ok = true
-        if nameChanged || passwordChanged {
-            ok = await controller.updateBroadcast(
-                section: radio.apSection,
-                ssid: trimmedName,
-                password: password.isEmpty ? nil : password,
-                hidden: nil,
-                // Securing a previously-open network: WPA2/WPA3 mixed for
-                // broad device compatibility.
-                encryption: (isOpenNetwork && !password.isEmpty) ? "sae-mixed" : nil,
-                service: service
-            )
-        }
-        if ok, channelChanged {
-            ok = await controller.setChannel(
-                device: radio.device, channel: channel, service: service)
-        }
+        // One request for name, password and channel: the wifi reload restarts
+        // the phone's own Wi-Fi, so a second request would fail or lose its reply.
+        let ok = await controller.updateBroadcast(
+            section: radio.apSection,
+            ssid: trimmedName,
+            password: password.isEmpty ? nil : password,
+            hidden: nil,
+            // Securing a previously-open network: WPA2/WPA3 mixed for
+            // broad device compatibility.
+            encryption: (isOpenNetwork && !password.isEmpty) ? "sae-mixed" : nil,
+            radio: channelChanged ? radio.device : nil,
+            channel: channelChanged ? channel : nil,
+            service: service
+        )
 
         if ok {
             Haptics.success()

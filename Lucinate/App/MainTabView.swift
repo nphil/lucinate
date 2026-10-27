@@ -10,6 +10,12 @@ struct MainTabView: View {
 
     @State private var showControlCenter = false
     @State private var showRebootConfirm = false
+    /// Watches the router for a hotel sign-in page. Injected below so every tab, and every sheet
+    /// presented from here, can show the banner.
+    @State private var captivePortal = CaptivePortalMonitor()
+    @State private var showCaptiveSheet = false
+    /// A sign-in request that came from inside Control Center; it opens once that sheet is gone.
+    @State private var captiveSheetPending = false
 
     var body: some View {
         @Bindable var state = appState
@@ -35,9 +41,12 @@ struct MainTabView: View {
                     showControlCenter = true
                 }
         }
-        .sheet(isPresented: $showControlCenter) {
+        .sheet(isPresented: $showControlCenter, onDismiss: controlCenterDidDismiss) {
             ControlCenterSheet()
                 .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showCaptiveSheet) {
+            CaptivePortalSheet()
         }
         .confirmationDialog(
             "Reboot Router?", isPresented: $showRebootConfirm, titleVisibility: .visible
@@ -51,6 +60,51 @@ struct MainTabView: View {
             Text("The router will restart and the connection will be interrupted for a minute or two.")
         }
         .environment(\.requestReboot, RequestRebootAction { showRebootConfirm = true })
+        .environment(captivePortal)
+        .onChange(of: captivePortal.signInRequestCount) { openCaptiveSheet() }
+        .onChange(of: showControlCenter) {
+            if showControlCenter { captivePortal.setAutoPresentationBlocked(true) }
+        }
+        .task(id: captivePollKey) {
+            await captivePortal.run(appState: appState)
+        }
+    }
+
+    // MARK: - Hotel sign-in
+
+    /// What the monitor's polling depends on. The task restarts whenever any of it changes, which
+    /// is also how polling pauses in the background and picks up again on return.
+    private struct CaptivePollKey: Hashable, Sendable {
+        let routerID: String?
+        let isActive: Bool
+        let isLive: Bool
+    }
+
+    private var captivePollKey: CaptivePollKey {
+        CaptivePollKey(
+            routerID: appState.selectedRouterID,
+            isActive: appState.isAppActive,
+            isLive: appState.phase == .main && !appState.isReviewerMode && appState.service != nil)
+    }
+
+    /// Two sheets cannot be up together, so a request made from inside Control Center closes it
+    /// first and opens the sign-in sheet once it is gone.
+    private func openCaptiveSheet() {
+        guard !showCaptiveSheet else { return }
+        if showControlCenter {
+            captiveSheetPending = true
+            showControlCenter = false
+        } else {
+            showCaptiveSheet = true
+        }
+    }
+
+    private func controlCenterDidDismiss() {
+        captivePortal.setAutoPresentationBlocked(false)
+        if captiveSheetPending {
+            captiveSheetPending = false
+            showCaptiveSheet = true
+        }
     }
 
     @ViewBuilder

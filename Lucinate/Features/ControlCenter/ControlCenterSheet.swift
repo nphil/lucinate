@@ -95,6 +95,7 @@ struct ControlCenterSheet: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     @Environment(\.requestReboot) private var requestReboot
+    @Environment(CaptivePortalMonitor.self) private var portal
 
     @State private var radiosController = QuickRadiosController()
     @State private var travelmateController = TravelmateController()
@@ -122,7 +123,7 @@ struct ControlCenterSheet: View {
                     if travelmateController.loaded {
                         travelmateCard
                     }
-                    if tailscaleController.loaded && !tailscaleController.notInstalled {
+                    if showsTailscaleCard {
                         tailscaleCard
                     }
                     rebootButton
@@ -339,29 +340,61 @@ struct ControlCenterSheet: View {
 
     // MARK: Tailscale
 
-    private var tailscaleCard: some View {
+    /// Shown from the first answer on — including a failed first check — and
+    /// hidden only when Tailscale is definitively not installed.
+    private var showsTailscaleCard: Bool {
+        (tailscaleController.loaded || tailscaleController.loadError != nil)
+            && !tailscaleController.isNotInstalled
+    }
+
+    /// Title, detail and dot color for the card. A failed check reads as
+    /// such, never as "not installed" or "disconnected".
+    private var tailscaleSummary: (title: String, detail: String?, color: Color) {
+        guard tailscaleController.loaded else {
+            return ("Can't check Tailscale", tailscaleController.loadError, theme.warning)
+        }
         let status = tailscaleController.status
+        switch status.state {
+        case .running:
+            return ("Connected", nil, theme.success)
+        case .needsLogin:
+            return ("Needs login", "Sign in from the router's web page.", theme.warning)
+        case .notConnected:
+            let detail =
+                portal.needsSignIn
+                ? "Waiting for the hotel Wi-Fi sign-in"
+                : (status.health ?? "Starting up or waiting for internet")
+            return ("Not connected yet", detail, theme.info)
+        case .notInstalled:
+            return ("Not installed", nil, theme.textSecondary)
+        }
+    }
+
+    private var tailscaleCard: some View {
+        let summary = tailscaleSummary
+        let isRunning = tailscaleController.status.isRunning
         return Card {
             VStack(alignment: .leading, spacing: Spacing.sm) {
                 cardHeader(
                     "Tailscale", systemImage: "point.3.connected.trianglepath.dotted",
                     busy: tailscaleController.isBusy)
-                HStack(spacing: Spacing.sm) {
-                    StatusDot(
-                        color: status.isRunning
-                            ? theme.success
-                            : (status.needsLogin ? theme.warning : theme.textSecondary),
-                        size: 10, glows: status.isRunning)
-                    Text(
-                        status.isRunning
-                            ? "Connected"
-                            : (status.needsLogin ? "Needs Login" : "Disconnected")
-                    )
-                    .font(.subheadline)
-                    .foregroundStyle(theme.textPrimary)
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.sm) {
+                    StatusDot(color: summary.color, size: 10, glows: isRunning)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(summary.title)
+                            .font(.subheadline)
+                            .foregroundStyle(theme.textPrimary)
+                        if let detail = summary.detail {
+                            Text(detail)
+                                .font(.caption)
+                                .foregroundStyle(theme.textSecondary)
+                        }
+                    }
                     Spacer()
                 }
-                exitNodeMenu
+                if isRunning {
+                    exitNodeMenu
+                }
             }
         }
     }
@@ -420,7 +453,7 @@ struct ControlCenterSheet: View {
             if !ok {
                 Haptics.error()
                 appState.showToast(
-                    tailscaleController.error ?? "Could not set exit node")
+                    tailscaleController.actionError ?? "Could not set exit node")
             }
         }
     }
