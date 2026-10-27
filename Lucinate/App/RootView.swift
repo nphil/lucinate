@@ -4,6 +4,7 @@ struct RootView: View {
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.colorScheme) private var systemColorScheme
+    @Environment(\.scenePhase) private var scenePhase
 
     private var activeTheme: Theme {
         switch themeManager.mode {
@@ -50,6 +51,9 @@ struct RootView: View {
         .preferredColorScheme(themeManager.preferredColorScheme)
         .task {
             await appState.bootstrap()
+        }
+        .onChange(of: scenePhase, initial: true) { _, newPhase in
+            appState.handleScenePhase(newPhase)
         }
     }
 }

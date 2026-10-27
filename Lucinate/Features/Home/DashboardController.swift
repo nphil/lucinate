@@ -25,7 +25,7 @@ final class DashboardController {
 
     /// SSID of the active repeated uplink (the STA interface), if any.
     var uplinkSSID: String? {
-        wireless.first { $0.mode == "sta" && !$0.ssid.isEmpty }?.ssid
+        wireless.first { $0.isUplink && !$0.ssid.isEmpty }?.ssid
     }
 
     // MARK: - Loading
@@ -48,8 +48,10 @@ final class DashboardController {
 
         do {
             wireless = WirelessNetwork.fromWirelessDevices(try await wirelessCall)
-        } catch let ubusError as UbusError where ubusError.isUnavailableObject {
-            // Wired-only router: no wireless subsystem. Not an error.
+        } catch let ubusError as UbusError where ubusError.isNotFound {
+            // Wired-only router: no wireless subsystem. Not an error. An
+            // access error is a failure instead, so a session hiccup keeps the
+            // list that is already on screen.
             wireless = []
         } catch {
             failure = failure ?? error.localizedDescription

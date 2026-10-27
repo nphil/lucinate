@@ -17,6 +17,16 @@ final class AppState {
     private(set) var phase: Phase = .splash
     private(set) var isReviewerMode = false
 
+    /// True while the scene is `.active`. Pollers outside this class gate on
+    /// it so nothing runs against a suspended app.
+    private(set) var isAppActive = true
+    /// +1 each time the app returns from the background in `.main`, after the
+    /// session was re-validated. Screens `.onChange` it to refresh their data.
+    private(set) var resumeCount = 0
+    /// False after two consecutive failed throughput polls, true again on the
+    /// next success. Drives the connection pill's "Reconnecting…" state.
+    private(set) var linkHealthy = true
+
     // MARK: Cross-tab navigation
 
     enum MainTab: Hashable {
@@ -136,6 +146,10 @@ final class AppState {
     private(set) var throughput = ThroughputCalculator()
     private var throughputTask: Task<Void, Never>?
     private var throughputDevices: Set<String> = []
+    private var consecutivePollFailures = 0
+    private static let pollFailuresBeforeUnhealthy = 2
+    private var isInBackground = false
+    private var resumeTask: Task<Void, Never>?
 
     // MARK: - Bootstrap (splash → auto-login → main | login)
 
@@ -215,6 +229,7 @@ final class AppState {
         }
 
         stopThroughputPolling()
+        cancelResume()
         if let old = client { await old.invalidate() }
 
         let newClient = UbusClient(endpoint: endpoint)
@@ -233,6 +248,7 @@ final class AppState {
                 ipAddress: endpoint.hostWithPort, username: username, password: password,
                 useHttps: result.useHttps,
                 hostname: boardInfo["hostname"].stringValue)
+            recordLinkResult(succeeded: true)
             startThroughputPolling()
             phase = .main
             return true
@@ -274,6 +290,7 @@ final class AppState {
 
     func logout() {
         stopThroughputPolling()
+        cancelResume()
         let oldClient = client
         Task { await oldClient?.invalidate() }
         client = nil
@@ -315,6 +332,7 @@ final class AppState {
         boardInfo = .null
         phase = .main
         Task { await refreshBoardInfo() }
+        recordLinkResult(succeeded: true)
         startThroughputPolling()
     }
 
@@ -322,6 +340,7 @@ final class AppState {
         KeychainStore.shared.delete("reviewer_mode_enabled")
         isReviewerMode = false
         stopThroughputPolling()
+        cancelResume()
         service = nil
         phase = .login
     }
@@ -385,16 +404,41 @@ final class AppState {
 
     func removeRouter(id: String) {
         if let router = routers.first(where: { $0.id == id }),
-            let endpoint = try? RouterEndpoint.parse(
-                (router.useHttps ? "https://" : "http://") + router.ipAddress)
+            let key = Self.certificateKey(of: router)
         {
-            KeychainStore.shared.removeCertificate(hostPort: endpoint.certificateKey)
+            KeychainStore.shared.removeCertificate(hostPort: key)
         }
         routers.removeAll { $0.id == id }
         if selectedRouterID == id {
             selectedRouterID = routers.first?.id
         }
         saveRouters()
+    }
+
+    /// Re-keys a saved router whose address or username changed, in place. The
+    /// active router stays active (the new id is persisted as the selection),
+    /// and its accepted certificate is dropped only when host:port changed.
+    /// Returns false when the new id already belongs to another router.
+    func replaceRouter(id oldID: String, with replacement: Router) -> Bool {
+        guard let index = routers.firstIndex(where: { $0.id == oldID }) else { return false }
+        if replacement.id != oldID, routers.contains(where: { $0.id == replacement.id }) {
+            return false
+        }
+        if let oldKey = Self.certificateKey(of: routers[index]),
+            oldKey != Self.certificateKey(of: replacement)
+        {
+            KeychainStore.shared.removeCertificate(hostPort: oldKey)
+        }
+        routers[index] = replacement
+        if selectedRouterID == oldID { selectedRouterID = replacement.id }
+        saveRouters()
+        return true
+    }
+
+    /// The "host:port" accepted certificates are stored under.
+    private static func certificateKey(of router: Router) -> String? {
+        let scheme = router.useHttps ? "https://" : "http://"
+        return (try? RouterEndpoint.parse(scheme + router.ipAddress))?.certificateKey
     }
 
     /// Switch the active connection to a saved router.
@@ -416,42 +460,52 @@ final class AppState {
 
     // MARK: - Board / system info
 
-    func refreshBoardInfo() async {
-        guard let service else { return }
-        if let board = try? await service.board() {
-            boardInfo = board
-            // Keep the saved router's hostname fresh for the switcher menu.
-            if let name = board["hostname"].stringValue,
-                let id = selectedRouterID,
-                let index = routers.firstIndex(where: { $0.id == id }),
-                routers[index].lastKnownHostname != name
-            {
-                routers[index] = routers[index].copyWith(lastKnownHostname: name)
-                saveRouters()
-            }
+    /// One `system board` read. Returns whether the router answered.
+    @discardableResult
+    func refreshBoardInfo() async -> Bool {
+        guard let service, let board = try? await service.board() else { return false }
+        boardInfo = board
+        // Keep the saved router's hostname fresh for the switcher menu.
+        if let name = board["hostname"].stringValue,
+            let id = selectedRouterID,
+            let index = routers.firstIndex(where: { $0.id == id }),
+            routers[index].lastKnownHostname != name
+        {
+            routers[index] = routers[index].copyWith(lastKnownHostname: name)
+            saveRouters()
         }
+        return true
     }
 
     // MARK: - Throughput polling (2s cadence)
 
     func startThroughputPolling() {
         stopThroughputPolling()
-        guard service != nil else { return }
+        guard service != nil, !isInBackground else { return }
         throughputTask = Task { [weak self] in
-            // Resolve which devices count toward the aggregate once up front.
-            if let self, let service = self.service,
-                let dump = try? await service.interfaceDump()
-            {
-                self.throughputDevices = ThroughputCalculator.aggregateDevices(
-                    fromInterfaceDump: dump)
-            }
+            // Which devices count toward the aggregate. Retried each round until
+            // the router answers: an empty set means every non-loopback device,
+            // which double-counts bridge members.
+            var devicesResolved = false
             while !Task.isCancelled {
                 guard let self, let service = self.service else { return }
-                if let devices = try? await service.networkDevices() {
+                do {
+                    if !devicesResolved {
+                        let dump = try await service.interfaceDump()
+                        self.throughputDevices = ThroughputCalculator.aggregateDevices(
+                            fromInterfaceDump: dump)
+                        devicesResolved = true
+                    }
+                    let devices = try await service.networkDevices()
                     self.throughput.ingest(
                         devices: devices,
                         includedDevices: self.throughputDevices,
                         now: Date().timeIntervalSince1970)
+                    self.recordLinkResult(succeeded: true)
+                } catch {
+                    // A cancelled poll (router switch, background) says nothing about the link.
+                    if Task.isCancelled { return }
+                    self.recordLinkResult(succeeded: false)
                 }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
@@ -461,6 +515,70 @@ final class AppState {
     func stopThroughputPolling() {
         throughputTask?.cancel()
         throughputTask = nil
+    }
+
+    // MARK: - App lifecycle (scene phase)
+
+    /// Driven by RootView. Sockets die and LuCI sessions expire while the phone
+    /// is away, so polling stops in the background; coming back re-validates
+    /// the session (the transport re-logs in if it expired) before polling
+    /// resumes and screens are told to refresh.
+    func handleScenePhase(_ scenePhase: ScenePhase) {
+        switch scenePhase {
+        case .active:
+            isAppActive = true
+            if isInBackground {
+                isInBackground = false
+                resumeFromBackground()
+            }
+        case .inactive:
+            isAppActive = false
+        case .background:
+            isAppActive = false
+            isInBackground = true
+            cancelResume()
+            stopThroughputPolling()
+        @unknown default:
+            break
+        }
+    }
+
+    private func resumeFromBackground() {
+        cancelResume()
+        guard phase == .main, !isRebooting, !isLoggingIn else { return }
+        // The first sample after the gap would average the whole absence.
+        throughput.reset()
+        resumeTask = Task { [weak self] in
+            guard let self else { return }
+            // Reviewer mode's mock transport has no session to validate.
+            if !self.isReviewerMode, await self.refreshBoardInfo() {
+                self.recordLinkResult(succeeded: true)
+            }
+            guard !Task.isCancelled, self.phase == .main, !self.isInBackground,
+                !self.isRebooting
+            else { return }
+            self.startThroughputPolling()
+            self.resumeCount += 1
+        }
+    }
+
+    private func cancelResume() {
+        resumeTask?.cancel()
+        resumeTask = nil
+    }
+
+    /// Two consecutive failed polls mean the link is down; any success (poll,
+    /// login, session re-validation) restores it.
+    private func recordLinkResult(succeeded: Bool) {
+        if succeeded {
+            consecutivePollFailures = 0
+            if !linkHealthy { linkHealthy = true }
+        } else {
+            consecutivePollFailures += 1
+            if consecutivePollFailures >= Self.pollFailuresBeforeUnhealthy, linkHealthy {
+                linkHealthy = false
+            }
+        }
     }
 
     // MARK: - Reboot (lockout + recovery polling — §3.8)

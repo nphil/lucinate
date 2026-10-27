@@ -388,9 +388,9 @@ private struct LeaseFormSheet: View {
     ) {
         self.title = title
         self.onSave = onSave
-        _name = State(initialValue: initialName)
-        _mac = State(initialValue: initialMAC)
-        _ip = State(initialValue: initialIP)
+        self.name = initialName
+        self.mac = initialMAC
+        self.ip = initialIP
     }
 
     var body: some View {

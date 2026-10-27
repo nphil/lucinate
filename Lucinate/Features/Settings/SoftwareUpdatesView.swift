@@ -92,16 +92,24 @@ final class SoftwareUpdatesController {
         stage = .unavailable
     }
 
+    /// Owned here, not by the view: a run outlives its screen, and the screen
+    /// lock suspends the network work it drives, so the display stays awake for
+    /// exactly as long as the controller is busy.
+    private func setBusy(_ busy: Bool) {
+        isBusy = busy
+        UIApplication.shared.isIdleTimerDisabled = busy
+    }
+
     // MARK: Check for updates
 
     func check(service: RouterService) async {
         guard !isBusy else { return }
-        isBusy = true
+        setBusy(true)
         error = nil
         upgrades = []
         installItems = []
         stage = .checking
-        defer { isBusy = false }
+        defer { setBusy(false) }
 
         do {
             activeStep = 0
@@ -145,12 +153,12 @@ final class SoftwareUpdatesController {
     /// re-reads installed versions so every row reports a confirmed result.
     func upgrade(service: RouterService) async {
         guard !isBusy, !upgrades.isEmpty else { return }
-        isBusy = true
+        setBusy(true)
         error = nil
         stage = .upgrading
         installItems = upgrades.map { InstallItem(upgrade: $0, state: .pending) }
         defer {
-            isBusy = false
+            setBusy(false)
             currentInstallIndex = nil
             isVerifying = false
         }
@@ -340,6 +348,7 @@ struct SoftwareUpdatesView: View {
             .navigationBarTitleDisplayMode(.inline)
             // Leaving mid-install would hide progress of a run that keeps going.
             .navigationBarBackButtonHidden(controller.stage == .upgrading)
+            .interactiveDismissDisabled(controller.stage == .upgrading)
             .task {
                 guard let service = appState.service else {
                     controller.markUnavailable()
@@ -347,17 +356,6 @@ struct SoftwareUpdatesView: View {
                 }
                 await controller.checkAvailability(service: service)
             }
-            .onChange(of: controller.stage) { _, stage in
-                Self.keepScreenAwake(during: stage)
-            }
-            .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
-    }
-
-    /// iOS suspends network work once the screen locks; keep it awake while
-    /// the router is being changed.
-    private static func keepScreenAwake(during stage: SoftwareUpdatesController.Stage) {
-        let busy = stage == .upgrading || stage == .checking
-        UIApplication.shared.isIdleTimerDisabled = busy
     }
 
     // MARK: Content

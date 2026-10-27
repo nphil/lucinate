@@ -4,7 +4,7 @@ import Foundation
 
 enum UbusError: Error, LocalizedError {
     case httpStatus(Int)
-    case rpcError(String)
+    case rpcError(code: Int, message: String)
     case ubusStatus(Int, String?)
     case badCredentials
     case certificateNotTrusted(hostPort: String)
@@ -12,13 +12,21 @@ enum UbusError: Error, LocalizedError {
     case notLoggedIn
     case invalidResponse
 
+    private static let accessDeniedText = "The router session expired or this login lacks permission"
+    private static let notFoundText = "The router doesn't offer this feature"
+
     var errorDescription: String? {
         switch self {
-        case .httpStatus(let code): return "Failed to call RPC: HTTP \(code)"
-        case .rpcError(let message): return "RPC error: \(message)"
+        case .httpStatus(let code):
+            return isAccessDenied ? Self.accessDeniedText : "Failed to call RPC: HTTP \(code)"
+        case .rpcError(let code, let message):
+            if isAccessDenied { return Self.accessDeniedText }
+            return "RPC error \(code): \(message)"
         case .ubusStatus(let status, let message):
             if let message, !message.isEmpty { return message }
-            if status == 6 { return "Permission denied (ubus status 6)" }
+            if isAccessDenied { return Self.accessDeniedText }
+            if isNotFound { return Self.notFoundText }
+            if status == 7 { return "The router took too long to answer" }
             return "ubus call failed (status \(status))"
         case .badCredentials: return "Login failed — check username and password"
         case .certificateNotTrusted(let hostPort):
@@ -29,15 +37,86 @@ enum UbusError: Error, LocalizedError {
         }
     }
 
-    /// Object missing / permission denied — used to degrade gracefully when
-    /// optional rpcd objects (tailscale, luci.wireguard) aren't installed.
-    var isUnavailableObject: Bool {
-        if case .ubusStatus(let status, _) = self {
-            // ubus: 2 = invalid command, 4 = not found, 6 = permission denied
-            return status == 2 || status == 4 || status == 6
+    // ubus status codes: 0 OK, 1 INVALID_COMMAND, 2 INVALID_ARGUMENT, 3 METHOD_NOT_FOUND,
+    // 4 NOT_FOUND, 5 NO_DATA, 6 PERMISSION_DENIED, 7 TIMEOUT, 8 NOT_SUPPORTED,
+    // 9 UNKNOWN_ERROR, 10 CONNECTION_FAILED.
+
+    /// The router refused the call: an unknown or expired session (JSON-RPC
+    /// -32002, the code LuCI's own UI treats as "session expired"), an ACL
+    /// denial (ubus 6), or HTTP 403. LuCI also answers -32002 for an object no
+    /// installed ACL covers, e.g. an uninstalled plugin. From `UbusClient` this
+    /// already survived one re-login, so it is a genuine permission gap.
+    var isAccessDenied: Bool {
+        switch self {
+        case .rpcError(let code, _): return code == -32002
+        case .ubusStatus(let status, _): return status == 6
+        case .httpStatus(let code): return code == 403
+        default: return false
         }
-        return false
     }
+
+    /// The ubus object or method does not exist (ubus 3 or 4).
+    var isNotFound: Bool {
+        guard case .ubusStatus(let status, _) = self else { return false }
+        return status == 3 || status == 4
+    }
+
+    /// A failure that may clear up on its own: no answer from the router, a
+    /// ubus timeout or connection failure, or a server-side HTTP error.
+    var isTransient: Bool {
+        switch self {
+        case .network: return true
+        case .ubusStatus(let status, _): return status == 7 || status == 10
+        case .httpStatus(let code): return (500...599).contains(code)
+        default: return false
+        }
+    }
+
+    /// Object missing or not usable by this login. Used to degrade gracefully
+    /// when optional rpcd objects (tailscale, luci.wireguard) aren't available.
+    var isUnavailableObject: Bool { isNotFound || isAccessDenied }
+}
+
+// MARK: - Retry policy
+
+/// Which failed requests may be sent again. A reply that never arrived does
+/// not prove the router skipped the request, so only reads — or requests that
+/// provably never left the phone — are repeated.
+enum UbusRetryPolicy {
+    static let maxAttempts = 3
+
+    private static let readOnlyProcedures: Set<String> = [
+        "get", "read", "list", "status", "info", "board", "dump", "assoclist", "scan",
+        "access", "state", "stat",
+    ]
+
+    /// Procedures that only read (`getWirelessDevices`, `get_status`, `board`, …).
+    /// Everything else — uci set/add/delete/commit, file exec, set_settings,
+    /// reboot — is single-attempt.
+    static func isReadOnly(procedure: String) -> Bool {
+        procedure.hasPrefix("get") || readOnlyProcedures.contains(procedure)
+    }
+
+    /// URLError codes raised before any request bytes went out (the TCP
+    /// connection was never established), so the router cannot have acted.
+    static func requestNeverSent(urlErrorCode code: Int) -> Bool {
+        switch code {
+        case NSURLErrorCannotConnectToHost,
+            NSURLErrorCannotFindHost,
+            NSURLErrorDNSLookupFailed,
+            NSURLErrorNotConnectedToInternet:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+/// A transport failure plus whether the request provably never left the
+/// phone. Internal to the retry loop; callers only ever see the `UbusError`.
+private struct RequestFailure: Error {
+    let error: UbusError
+    let neverSent: Bool
 }
 
 // MARK: - TLS trust-on-first-use delegate
@@ -110,12 +189,16 @@ protocol UbusCalling: Sendable {
     /// so it suits package management. Single attempt: callers must never
     /// have a mutating command silently re-issued.
     func cgiExec(command: String, params: [String], timeout: TimeInterval) async throws -> Data
+    /// Names of every ubus object registered on the router (JSON-RPC `list`,
+    /// no session needed).
+    func listObjects() async throws -> [String]
 }
 
 // MARK: - UbusClient
 
 /// One instance per router connection. Handles LuCI form login (sysauth cookie),
-/// JSON-RPC calls through /cgi-bin/luci/admin/ubus, transient retries, a global
+/// JSON-RPC calls through /cgi-bin/luci/admin/ubus, a single shared re-login when
+/// the router rejects the session, retries of read-only calls, a global
 /// 3-concurrent-call gate, and TOFU TLS.
 actor UbusClient: UbusCalling {
     private(set) var endpoint: RouterEndpoint
@@ -124,6 +207,31 @@ actor UbusClient: UbusCalling {
     private let trustDelegate = TOFUTrustDelegate()
     private let semaphore = AsyncSemaphore(limit: 3)
     private var session: URLSession
+
+    /// Credentials of the last successful `login`, kept so an expired LuCI
+    /// session can be replaced without involving the user.
+    private struct Credentials: Sendable {
+        let username: String
+        let password: String
+    }
+    private var credentials: Credentials?
+    private var lastLoginAt: ContinuousClock.Instant?
+    /// The one re-login shared by every call that finds the session rejected.
+    private var reloginTask: Task<String, Error>?
+    /// A denial this soon after a successful login is the account's ACL, not an
+    /// expired session; logging in again would not help and would hammer the router.
+    private static let reloginCooldown: Duration = .seconds(5)
+
+    /// Object names from the latest `list`, so a denial for an uninstalled
+    /// plugin is recognised without a re-login. Short-lived: installing a
+    /// package changes the set.
+    private struct ObjectCache {
+        let names: Set<String>
+        let fetchedAt: ContinuousClock.Instant
+    }
+    private var objectCache: ObjectCache?
+    private var objectListTask: Task<Set<String>?, Never>?
+    private static let objectCacheLifetime: Duration = .seconds(30)
 
     init(endpoint: RouterEndpoint) {
         self.endpoint = endpoint
@@ -145,6 +253,12 @@ actor UbusClient: UbusCalling {
 
     func invalidate() {
         session.invalidateAndCancel()
+        reloginTask?.cancel()
+        reloginTask = nil
+        objectListTask?.cancel()
+        objectListTask = nil
+        objectCache = nil
+        credentials = nil
         token = nil
     }
 
@@ -173,7 +287,11 @@ actor UbusClient: UbusCalling {
         for attempt in 1...attempts {
             if Task.isCancelled { throw CancellationError() }
             do {
-                return try await loginOnce(username: username, password: password)
+                let result = try await loginOnce(username: username, password: password)
+                credentials = Credentials(username: username, password: password)
+                lastLoginAt = ContinuousClock.now
+                objectCache = nil
+                return result
             } catch let error as UbusError {
                 switch error {
                 case .badCredentials, .certificateNotTrusted:
@@ -228,7 +346,9 @@ actor UbusClient: UbusCalling {
         let (_, response) = try await perform(request)
         guard let http = response as? HTTPURLResponse else { throw UbusError.invalidResponse }
         guard (200...399).contains(http.statusCode) else {
-            throw UbusError.httpStatus(http.statusCode)
+            // LuCI answers a rejected login with 403 and no session cookie.
+            throw http.statusCode == 403
+                ? UbusError.badCredentials : UbusError.httpStatus(http.statusCode)
         }
 
         // The sysauth cookie may have been set on an intermediate redirect
@@ -278,60 +398,161 @@ actor UbusClient: UbusCalling {
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
+    // MARK: Session recovery
+
+    /// Replaces a session the router rejected. Returns the token to retry
+    /// with, or nil when logging in again cannot help.
+    private func recoverSession(rejecting rejectedToken: String) async throws -> String? {
+        // A concurrent caller already swapped the session while this call was in flight.
+        if let current = token, current != rejectedToken { return current }
+        if let reloginTask { return try await reloginTask.value }
+        guard let credentials else { return nil }
+        if let lastLoginAt, ContinuousClock.now - lastLoginAt < Self.reloginCooldown {
+            return nil
+        }
+
+        // `login` keeps the http→https detection. Two attempts: the router just
+        // answered, so a second try only has to cover a web server mid-restart.
+        let task: Task<String, Error> = Task {
+            defer { self.reloginTask = nil }
+            do {
+                return try await self.login(
+                    username: credentials.username, password: credentials.password,
+                    maxAttempts: 2
+                ).token
+            } catch UbusError.badCredentials {
+                // The stored password no longer works; stop retrying it on every call.
+                self.credentials = nil
+                throw UbusError.badCredentials
+            }
+        }
+        reloginTask = task
+        return try await task.value
+    }
+
     // MARK: RPC (ubus call — §3.2)
 
     func call(_ object: String, _ procedure: String, _ params: JSONValue = .object([:]))
         async throws -> JSONValue
     {
         guard let token else { throw UbusError.notLoggedIn }
-        return try await rawCall(sessionID: token, object: object, procedure: procedure, params: params)
+        do {
+            return try await rawCall(
+                sessionID: token, object: object, procedure: procedure, params: params)
+        } catch let error as UbusError where error.isAccessDenied {
+            // LuCI answers an object no installed ACL covers (an uninstalled
+            // plugin) with the same "access denied" as an expired session, and a
+            // re-login cannot fix that.
+            if await isMissingFromRouter(object) {
+                throw UbusError.ubusStatus(4, "\(object) is not installed")
+            }
+            // A denied call never ran, so repeating it after a re-login is safe
+            // even for mutations.
+            guard let fresh = try await recoverSession(rejecting: token) else { throw error }
+            return try await rawCall(
+                sessionID: fresh, object: object, procedure: procedure, params: params)
+        }
     }
 
-    /// Unauthenticated availability probe (session id "").
-    func probeCall(_ object: String, _ procedure: String) async throws -> JSONValue {
-        try await rawCall(sessionID: "", object: object, procedure: procedure, params: .object([:]))
+    /// `list` needs no session, so a denial here is never a reason to re-login.
+    func listObjects() async throws -> [String] {
+        let names = try await withRetries(readOnly: true) { session, endpoint in
+            try await Self.executeList(session: session, endpoint: endpoint)
+        }
+        objectCache = ObjectCache(names: Set(names), fetchedAt: ContinuousClock.now)
+        return names
+    }
+
+    /// True only when an object list was fetched and lacks `object`. When the
+    /// list can't be fetched the answer is unknown and the caller re-logs in.
+    private func isMissingFromRouter(_ object: String) async -> Bool {
+        guard let names = await knownObjects() else { return false }
+        return !names.contains(object)
+    }
+
+    /// The cached object set, fetched lazily and shared by concurrent callers.
+    private func knownObjects() async -> Set<String>? {
+        if let objectCache, ContinuousClock.now - objectCache.fetchedAt < Self.objectCacheLifetime {
+            return objectCache.names
+        }
+        if let objectListTask { return await objectListTask.value }
+        let task: Task<Set<String>?, Never> = Task {
+            defer { self.objectListTask = nil }
+            guard let names = try? await self.listObjects() else { return nil }
+            return Set(names)
+        }
+        objectListTask = task
+        return await task.value
     }
 
     func cgiExec(command: String, params: [String], timeout: TimeInterval) async throws -> Data {
         guard let token else { throw UbusError.notLoggedIn }
-        return try await semaphore.run { [endpoint, session] in
-            try await Self.executeCgiExec(
-                session: session, endpoint: endpoint, sessionID: token,
-                command: command, params: params, timeout: timeout)
+        do {
+            return try await runCgiExec(
+                sessionID: token, command: command, params: params, timeout: timeout)
+        } catch let error as UbusError where error.isAccessDenied {
+            guard let fresh = try await recoverSession(rejecting: token) else { throw error }
+            return try await runCgiExec(
+                sessionID: fresh, command: command, params: params, timeout: timeout)
+        }
+    }
+
+    /// Single attempt: a command that may already have run is never re-sent.
+    private func runCgiExec(
+        sessionID: String, command: String, params: [String], timeout: TimeInterval
+    ) async throws -> Data {
+        do {
+            return try await semaphore.run { [endpoint, session] in
+                try await Self.executeCgiExec(
+                    session: session, endpoint: endpoint, sessionID: sessionID,
+                    command: command, params: params, timeout: timeout)
+            }
+        } catch let failure as RequestFailure {
+            throw failure.error
         }
     }
 
     private func rawCall(
         sessionID: String, object: String, procedure: String, params: JSONValue
     ) async throws -> JSONValue {
-        var lastError: Error = UbusError.invalidResponse
-        for attempt in 1...3 {
-            do {
-                return try await semaphore.run { [endpoint, session] in
-                    try await Self.executeRPC(
-                        session: session, endpoint: endpoint, sessionID: sessionID,
-                        object: object, procedure: procedure, params: params)
-                }
-            } catch let error as UbusError {
-                if case .network = error {
-                    lastError = error  // transient — retry
-                } else {
-                    throw error
-                }
-            } catch {
-                lastError = error
-            }
-            if attempt < 3 {
-                try? await Task.sleep(nanoseconds: UInt64(attempt) * 300_000_000)
-            }
+        try await withRetries(readOnly: UbusRetryPolicy.isReadOnly(procedure: procedure)) {
+            session, endpoint in
+            try await Self.executeRPC(
+                session: session, endpoint: endpoint, sessionID: sessionID,
+                object: object, procedure: procedure, params: params)
         }
-        throw lastError
     }
 
-    private static func executeRPC(
-        session: URLSession, endpoint: RouterEndpoint, sessionID: String,
-        object: String, procedure: String, params: JSONValue
-    ) async throws -> JSONValue {
+    /// Runs one request through the concurrency gate, repeating it on a
+    /// transient failure only when that cannot duplicate a change: reads, or a
+    /// request that provably never left the phone.
+    private func withRetries<T: Sendable>(
+        readOnly: Bool,
+        _ request: @escaping @Sendable (URLSession, RouterEndpoint) async throws -> T
+    ) async throws -> T {
+        var attempt = 1
+        while true {
+            let session = self.session
+            let endpoint = self.endpoint
+            do {
+                return try await semaphore.run { try await request(session, endpoint) }
+            } catch let failure as RequestFailure {
+                guard attempt < UbusRetryPolicy.maxAttempts, readOnly || failure.neverSent else {
+                    throw failure.error
+                }
+            } catch let error as UbusError {
+                guard attempt < UbusRetryPolicy.maxAttempts, readOnly, error.isTransient else {
+                    throw error
+                }
+            }
+            try await Task.sleep(nanoseconds: UInt64(attempt) * 300_000_000)
+            attempt += 1
+        }
+    }
+
+    private static func rpcRequest(
+        endpoint: RouterEndpoint, method: String, params: JSONValue
+    ) throws -> URLRequest {
         guard let url = URL(string: "\(endpoint.baseURLString)/cgi-bin/luci/admin/ubus") else {
             throw UbusError.invalidResponse
         }
@@ -343,29 +564,57 @@ actor UbusClient: UbusCalling {
         let envelope: JSONValue = .object([
             "jsonrpc": .string("2.0"),
             "id": .number(1),
-            "method": .string("call"),
-            "params": .array([
-                .string(sessionID), .string(object), .string(procedure), params,
-            ]),
+            "method": .string(method),
+            "params": params,
         ])
         request.httpBody = try envelope.encoded()
+        return request
+    }
 
+    /// Sends the request. A transport-level failure surfaces as `RequestFailure`
+    /// so the retry loop can tell whether the request ever left the phone.
+    private static func send(
+        _ request: URLRequest, session: URLSession, endpoint: RouterEndpoint
+    ) async throws -> (Data, HTTPURLResponse) {
         let data: Data
         let response: URLResponse
         do {
             (data, response) = try await session.data(for: request)
         } catch {
-            throw Self.mapTransportError(error, endpoint: endpoint)
+            let mapped = Self.mapTransportError(error, endpoint: endpoint)
+            guard case .network = mapped else { throw mapped }
+            let nsError = error as NSError
+            throw RequestFailure(
+                error: mapped,
+                neverSent: nsError.domain == NSURLErrorDomain
+                    && UbusRetryPolicy.requestNeverSent(urlErrorCode: nsError.code))
         }
         guard let http = response as? HTTPURLResponse else { throw UbusError.invalidResponse }
+        return (data, http)
+    }
+
+    private static func rpcError(from error: JSONValue) -> UbusError {
+        let message = error["message"].stringValue ?? error.coercedString ?? "unknown"
+        // A reply without a numeric code is malformed; -32603 is JSON-RPC's
+        // generic "Internal error".
+        let code = error["code"].intValue ?? -32603
+        return .rpcError(code: code, message: message)
+    }
+
+    private static func executeRPC(
+        session: URLSession, endpoint: RouterEndpoint, sessionID: String,
+        object: String, procedure: String, params: JSONValue
+    ) async throws -> JSONValue {
+        let request = try rpcRequest(
+            endpoint: endpoint, method: "call",
+            params: .array([
+                .string(sessionID), .string(object), .string(procedure), params,
+            ]))
+        let (data, http) = try await send(request, session: session, endpoint: endpoint)
         guard http.statusCode == 200 else { throw UbusError.httpStatus(http.statusCode) }
 
         let json = try JSONValue.parse(data)
-        if !json["error"].isNull {
-            let message = json["error"]["message"].stringValue
-                ?? json["error"].coercedString ?? "unknown"
-            throw UbusError.rpcError(message)
-        }
+        if !json["error"].isNull { throw rpcError(from: json["error"]) }
         let result = json["result"]
         guard let items = result.arrayValue else {
             // Normalize a bare result to [0, result].
@@ -379,6 +628,27 @@ actor UbusClient: UbusCalling {
             throw UbusError.ubusStatus(status, message)
         }
         return items.count > 1 ? items[1] : .null
+    }
+
+    private static func executeList(
+        session: URLSession, endpoint: RouterEndpoint
+    ) async throws -> [String] {
+        let request = try rpcRequest(endpoint: endpoint, method: "list", params: .array([]))
+        let (data, http) = try await send(request, session: session, endpoint: endpoint)
+        guard http.statusCode == 200 else { throw UbusError.httpStatus(http.statusCode) }
+
+        let json = try JSONValue.parse(data)
+        if !json["error"].isNull { throw rpcError(from: json["error"]) }
+        guard let names = parseObjectList(json["result"]) else { throw UbusError.invalidResponse }
+        return names
+    }
+
+    /// Object names from a `list` result. LuCI wraps them in a one-element
+    /// array (`[["system", "uci"]]`); a bare array is tolerated too.
+    static func parseObjectList(_ result: JSONValue) -> [String]? {
+        guard let items = result.arrayValue else { return nil }
+        let names = items.first?.arrayValue ?? items
+        return names.compactMap { $0.stringValue }
     }
 
     private static func executeCgiExec(
@@ -400,14 +670,7 @@ actor UbusClient: UbusCalling {
             "sessionid=\(formEncode(sessionID))&command=\(formEncode(commandLine))&stderr=0"
         request.httpBody = Data(body.utf8)
 
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            throw Self.mapTransportError(error, endpoint: endpoint)
-        }
-        guard let http = response as? HTTPURLResponse else { throw UbusError.invalidResponse }
+        let (data, http) = try await send(request, session: session, endpoint: endpoint)
         switch http.statusCode {
         case 200:
             return data

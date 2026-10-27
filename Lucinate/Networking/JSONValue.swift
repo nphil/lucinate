@@ -76,7 +76,11 @@ extension JSONValue {
 
     var intValue: Int? {
         switch self {
-        case .number(let value): return Int(value)
+        case .number(let value):
+            // `Int(_: Double)` traps on NaN, infinity and values outside Int's
+            // range; rpcd's 64-bit counters can reach that. Truncates toward
+            // zero like `Int(_:)`.
+            return Int(exactly: value.rounded(.towardZero))
         case .string(let value): return Int(value)
         default: return nil
         }

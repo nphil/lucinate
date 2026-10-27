@@ -10,6 +10,15 @@ struct RouterService: Sendable {
         self.transport = transport
     }
 
+    // MARK: - ubus
+
+    /// Names of every ubus object the router has registered. Needs no login,
+    /// so it still answers "is this optional rpcd plugin installed" when the
+    /// session is gone.
+    func ubusObjects() async throws -> [String] {
+        try await transport.listObjects()
+    }
+
     // MARK: - system
 
     func board() async throws -> JSONValue {
@@ -101,6 +110,13 @@ struct RouterService: Sendable {
 
     func uciCommit(config: String) async throws {
         _ = try await transport.call("uci", "commit", .object(["config": .string(config)]))
+    }
+
+    /// Drops uncommitted `uci set/add/delete` edits for a config. `uci get`
+    /// returns staged values, so after a failed change they would show as
+    /// applied and ride along with the next commit.
+    func uciRevert(config: String) async throws {
+        _ = try await transport.call("uci", "revert", .object(["config": .string(config)]))
     }
 
     // MARK: - iwinfo
@@ -299,12 +315,22 @@ struct RouterService: Sendable {
         _ = try await fileExec(command: "/etc/init.d/travelmate", params: ["restart"])
     }
 
+    /// Runs uci edits for `config`, then commits. A failure up to and including
+    /// the commit reverts what was staged. Once the commit has succeeded
+    /// nothing is staged, so the reload that follows is outside this.
+    private func commitOrRevert(config: String, _ edits: () async throws -> Void) async throws {
+        do {
+            try await edits()
+            try await uciCommit(config: config)
+        } catch {
+            try? await uciRevert(config: config)
+            throw error
+        }
+    }
+
     /// Toggle a wifi-iface or wifi-device section on/off, then reload wifi.
     func setWirelessSectionDisabled(section: String, disabled: Bool) async throws {
-        try await uciSet(
-            config: "wireless", section: section, values: ["disabled": disabled ? "1" : "0"])
-        try await uciCommit(config: "wireless")
-        try await wifiReload()
+        try await updateWireless(section: section, values: ["disabled": disabled ? "1" : "0"])
     }
 
     func setTravelmateEnabled(_ enabled: Bool) async throws {
@@ -315,54 +341,155 @@ struct RouterService: Sendable {
         try await travelmateRestart()
     }
 
-    /// Creates the `wireless.trm_uplinkN` STA iface + matching travelmate
-    /// uplink, commits both, restarts travelmate.
+    // MARK: - travelmate uplinks
+
+    /// What the saved-uplink operations decide on, read together.
+    private struct UplinkContext: Sendable {
+        let travelmate: JSONValue
+        let wireless: JSONValue
+        /// Travelmate currently holds an uplink connection.
+        let connected: Bool
+    }
+
+    private func uplinkConfigs() async throws -> (travelmate: JSONValue, wireless: JSONValue) {
+        async let travelmate = uciGet(config: "travelmate")
+        async let wireless = uciGet(config: "wireless")
+        let travelmateValues = try await travelmate
+        let wirelessValues = try await wireless
+        return (travelmateValues, wirelessValues)
+    }
+
+    private func uplinkContext() async throws -> UplinkContext {
+        async let connected = travelmateIsConnected()
+        let configs = try await uplinkConfigs()
+        let isConnected = await connected
+        return UplinkContext(
+            travelmate: configs.travelmate, wireless: configs.wireless, connected: isConnected)
+    }
+
+    /// An unreadable status file counts as "not connected".
+    private func travelmateIsConnected() async -> Bool {
+        guard let raw = try? await fileRead(path: TravelmateStatus.runtimeFilePath) else {
+            return false
+        }
+        return TravelmateStatus.fromRuntime(raw, enabled: true).isConnected
+    }
+
+    /// Travelmate leaves a paused uplink's wifi-iface `disabled=1`. It is only
+    /// lifted while nothing is connected: a second STA enabled beside a live
+    /// uplink would be brought up at the next wifi reload and can knock the
+    /// live one off its radio. Travelmate sets the flag itself when it retries.
+    private func shouldLiftDisabled(_ staSection: String, _ context: UplinkContext) -> Bool {
+        !context.connected && context.wireless[staSection]["disabled"].coercedString == "1"
+    }
+
+    /// A restart does nothing while travelmate's master switch is off, so the
+    /// operations that exist to retry a network also switch it on.
+    private func switchTravelmateOn(_ context: UplinkContext) async throws {
+        let global = context.travelmate["global"]
+        guard global[".type"].stringValue == "travelmate",
+            global["trm_enabled"].coercedString != "1"
+        else { return }
+        try await uciSet(config: "travelmate", section: "global", values: ["trm_enabled": "1"])
+    }
+
+    /// Saves a network as an uplink: a `mode=sta` wifi-iface plus its travelmate
+    /// `uplink`. A network that is already saved (same SSID on the same radio)
+    /// reuses its sections instead of getting a second copy: it is re-enabled
+    /// and, when a password is given, its key is replaced. A missing half is
+    /// created, which repairs a half-saved network.
     func addTravelmateUplink(
         ssid: String, password: String, device: String, encryption: String
     ) async throws {
-        let wireless = try await uciGet(config: "wireless")
-        var maxIndex = 0
-        for name in (wireless.objectValue ?? [:]).keys {
-            if name.hasPrefix("trm_uplink"), let n = Int(name.dropFirst("trm_uplink".count)) {
-                maxIndex = max(maxIndex, n)
+        let context = try await uplinkContext()
+        let uplinkSection = TravelmateConfig.uplinkSection(
+            in: context.travelmate, ssid: ssid, device: device)
+        let bssid = uplinkSection.flatMap { context.travelmate[$0]["bssid"].coercedString } ?? ""
+        let staSection = TravelmateConfig.staSections(
+            in: context.wireless, ssid: ssid, device: device, bssid: bssid
+        ).first
+
+        if let staSection {
+            var values: [String: String] = [:]
+            if encryption != "none", !password.isEmpty {
+                values["encryption"] = encryption
+                values["key"] = password
             }
+            if shouldLiftDisabled(staSection, context) {
+                values["disabled"] = "0"
+            }
+            if !values.isEmpty {
+                try await uciSet(config: "wireless", section: staSection, values: values)
+            }
+        } else {
+            if encryption != "none" && password.isEmpty { throw TravelmateError.passwordRequired }
+            var values: [String: String] = [
+                "device": device,
+                "mode": "sta",
+                "network": "travel_wan",
+                "ssid": ssid,
+                "encryption": encryption,
+                "disabled": "0",
+            ]
+            if encryption != "none" { values["key"] = password }
+            try await uciAdd(
+                config: "wireless", type: "wifi-iface",
+                name: TravelmateConfig.nextStaSectionName(in: context.wireless),
+                values: values)
         }
-        let section = "trm_uplink\(maxIndex + 1)"
 
-        var ifaceValues: [String: String] = [
-            "device": device,
-            "mode": "sta",
-            "network": "travel_wan",
-            "ssid": ssid,
-            "encryption": encryption,
-            "disabled": "0",
-        ]
-        if encryption != "none" { ifaceValues["key"] = password }
+        if let uplinkSection {
+            if context.travelmate[uplinkSection]["enabled"].coercedString != "1" {
+                try await uciSet(
+                    config: "travelmate", section: uplinkSection, values: ["enabled": "1"])
+            }
+        } else {
+            try await uciAdd(
+                config: "travelmate", type: "uplink",
+                values: ["enabled": "1", "device": device, "ssid": ssid])
+        }
+        try await switchTravelmateOn(context)
 
-        try await uciAdd(config: "wireless", type: "wifi-iface", name: section, values: ifaceValues)
-        try await uciAdd(
-            config: "travelmate", type: "uplink",
-            values: ["enabled": "1", "device": device, "ssid": ssid])
         try await uciCommit(config: "wireless")
         try await uciCommit(config: "travelmate")
         try await travelmateRestart()
     }
 
-    /// Removes the STA iface matching (ssid, device) and the travelmate uplink
-    /// section, commits both, restarts travelmate.
-    func removeTravelmateUplink(ssid: String, device: String, uplinkSection: String) async throws {
-        let wireless = try await uciGet(config: "wireless")
-        var ifaceSection: String?
-        for (name, section) in wireless.objectValue ?? [:] {
-            guard section[".type"].stringValue == "wifi-iface",
-                section["mode"].stringValue == "sta",
-                section["ssid"].stringValue == ssid,
-                section["device"].stringValue == device
-            else { continue }
-            ifaceSection = name
+    /// Resumes a saved uplink travelmate stopped trying (it pauses a network
+    /// after 3 failed connects): enables it again, lifts a `disabled` flag on
+    /// its wifi-iface, and restarts travelmate so it retries immediately.
+    func reconnectTravelmateUplink(section: String) async throws {
+        let context = try await uplinkContext()
+        guard context.travelmate[section][".type"].stringValue == "uplink" else {
+            throw TravelmateError.uplinkNotFound
         }
-        if let ifaceSection {
-            try await uciDelete(config: "wireless", section: ifaceSection)
+        let uplink = TravelmateUplink.fromUci(sectionId: section, context.travelmate[section])
+        let staSection = TravelmateConfig.staSections(
+            in: context.wireless, ssid: uplink.ssid, device: uplink.device, bssid: uplink.bssid
+        ).first
+
+        if let staSection, shouldLiftDisabled(staSection, context) {
+            try await uciSet(config: "wireless", section: staSection, values: ["disabled": "0"])
+        }
+        try await uciSet(config: "travelmate", section: section, values: ["enabled": "1"])
+        try await switchTravelmateOn(context)
+
+        try await uciCommit(config: "wireless")
+        try await uciCommit(config: "travelmate")
+        try await travelmateRestart()
+    }
+
+    /// Removes one saved uplink: its travelmate section and the single
+    /// wifi-iface travelmate links to it. When several saved networks share an
+    /// SSID only that one wifi-iface goes, so the others keep working.
+    func removeTravelmateUplink(ssid: String, device: String, uplinkSection: String) async throws {
+        let configs = try await uplinkConfigs()
+        let bssid = configs.travelmate[uplinkSection]["bssid"].coercedString ?? ""
+        let staSection = TravelmateConfig.staSections(
+            in: configs.wireless, ssid: ssid, device: device, bssid: bssid
+        ).first
+        if let staSection {
+            try await uciDelete(config: "wireless", section: staSection)
             try await uciCommit(config: "wireless")
         }
         try await uciDelete(config: "travelmate", section: uplinkSection)
@@ -372,19 +499,29 @@ struct RouterService: Sendable {
 
     /// Sets a radio's channel ("auto" or a number), commits, reloads wifi.
     func setRadioChannel(radio: String, channel: String) async throws {
-        try await uciSet(config: "wireless", section: radio, values: ["channel": channel])
-        try await uciCommit(config: "wireless")
-        try await wifiReload()
+        try await updateWireless(section: radio, values: ["channel": channel])
     }
 
     // MARK: - Tier A: Wi-Fi AP editing
 
-    /// Applies option changes to any wireless section (wifi-iface or
-    /// wifi-device), commits, and reloads wifi.
-    func updateWireless(section: String, values: [String: String]) async throws {
-        try await uciSet(config: "wireless", section: section, values: values)
-        try await uciCommit(config: "wireless")
+    /// Applies option changes to wireless sections (wifi-iface or wifi-device):
+    /// every `uci set`, then ONE commit and ONE `wifi reload`. The reload
+    /// restarts the radio the phone is attached to, so a second request after
+    /// it would fail or lose its reply and leave the change half applied.
+    func updateWireless(changes: [(section: String, values: [String: String])]) async throws {
+        let changes = changes.filter { !$0.values.isEmpty }
+        guard !changes.isEmpty else { return }
+        try await commitOrRevert(config: "wireless") {
+            for change in changes {
+                try await uciSet(
+                    config: "wireless", section: change.section, values: change.values)
+            }
+        }
         try await wifiReload()
+    }
+
+    func updateWireless(section: String, values: [String: String]) async throws {
+        try await updateWireless(changes: [(section: section, values: values)])
     }
 
     // MARK: - Tier A: DHCP static leases
@@ -415,8 +552,9 @@ struct RouterService: Sendable {
     }
 
     func updateStaticLease(section: String, mac: String, ip: String, name: String?) async throws {
-        var values = ["mac": mac, "ip": ip]
-        if let name, !name.isEmpty { values["name"] = name }
+        // `name` is always written: leaving it out when the field was cleared
+        // would keep the old hostname.
+        let values = ["mac": mac, "ip": ip, "name": name ?? ""]
         try await uciSet(config: "dhcp", section: section, values: values)
         try await uciCommit(config: "dhcp")
         try await restartDnsmasq()
@@ -467,18 +605,20 @@ struct RouterService: Sendable {
     /// Drops all forwarded traffic from a MAC (internet block).
     func blockClient(mac: String) async throws {
         let sanitized = mac.uppercased()
-        try await uciAdd(
-            config: "firewall", type: "rule",
-            values: [
-                "name": Self.blockRulePrefix + sanitized.replacingOccurrences(of: ":", with: ""),
-                "src": "lan",
-                "dest": "wan",
-                "src_mac": sanitized,
-                "proto": "all",
-                "target": "REJECT",
-                "enabled": "1",
-            ])
-        try await uciCommit(config: "firewall")
+        try await commitOrRevert(config: "firewall") {
+            try await uciAdd(
+                config: "firewall", type: "rule",
+                values: [
+                    "name": Self.blockRulePrefix
+                        + sanitized.replacingOccurrences(of: ":", with: ""),
+                    "src": "lan",
+                    "dest": "wan",
+                    "src_mac": sanitized,
+                    "proto": "all",
+                    "target": "REJECT",
+                    "enabled": "1",
+                ])
+        }
         try await reloadFirewall()
     }
 
@@ -494,10 +634,25 @@ struct RouterService: Sendable {
             sections.append(name)
         }
         guard !sections.isEmpty else { return }
-        for section in sections {
-            try await uciDelete(config: "firewall", section: section)
+        try await commitOrRevert(config: "firewall") {
+            for section in sections {
+                try await uciDelete(config: "firewall", section: section)
+            }
         }
-        try await uciCommit(config: "firewall")
         try await reloadFirewall()
+    }
+}
+
+enum TravelmateError: LocalizedError {
+    case uplinkNotFound
+    case passwordRequired
+
+    var errorDescription: String? {
+        switch self {
+        case .uplinkNotFound:
+            return "That saved network is no longer on the router. Pull down to refresh."
+        case .passwordRequired:
+            return "Enter the Wi-Fi password to save this network."
+        }
     }
 }

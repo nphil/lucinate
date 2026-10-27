@@ -5,20 +5,39 @@ import SwiftUI
 struct TravelMateView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
-    @Environment(\.openURL) private var openURL
 
     @State private var controller = TravelmateController()
+    @State private var lastRouterID: String?
     @State private var showAddSheet = false
     @State private var editingRadio: BroadcastRadio?
     @State private var uplinkToForget: TravelmateUplink?
     @State private var pendingBandDevices: Set<String>?
 
+    /// A different router, or a return from the background with a re-validated
+    /// session, both mean everything shown may be stale.
+    private struct LoadTrigger: Equatable, Sendable {
+        let routerID: String?
+        let resumeCount: Int
+    }
+
     var body: some View {
         content
             .background(theme.background)
             .navigationTitle("TravelMate")
-            .task(id: appState.selectedRouterID) {
+            .task(
+                id: LoadTrigger(
+                    routerID: appState.selectedRouterID, resumeCount: appState.resumeCount)
+            ) {
+                if lastRouterID != appState.selectedRouterID {
+                    lastRouterID = appState.selectedRouterID
+                    controller.reset()
+                }
                 await loadIfPossible()
+            }
+            // Live status only while the tab is on screen: SwiftUI cancels
+            // this task when the view disappears.
+            .task {
+                await pollWhileVisible()
             }
             .overlay(alignment: .bottomTrailing) {
                 if controller.loaded {
@@ -67,7 +86,9 @@ struct TravelMateView: View {
 
     @ViewBuilder
     private var content: some View {
-        if controller.loaded {
+        if controller.notInstalled {
+            notInstalledView
+        } else if controller.loaded {
             loadedContent
         } else if let error = controller.error {
             ErrorStateView(message: error) {
@@ -79,13 +100,35 @@ struct TravelMateView: View {
         }
     }
 
+    private var notInstalledView: some View {
+        ScrollView {
+            VStack(spacing: Spacing.md) {
+                EmptyStateView(
+                    systemImage: "suitcase",
+                    title: "TravelMate isn't installed on this router",
+                    message: "Install the travelmate package on the router to join hotel Wi-Fi from here."
+                )
+                Button("Check Again") {
+                    Task { await loadIfPossible() }
+                }
+                .buttonStyle(.bordered)
+                .tint(theme.accent)
+            }
+            .containerRelativeFrame(.vertical)
+        }
+        .refreshable {
+            await loadIfPossible()
+        }
+    }
+
     private var loadedContent: some View {
         ScrollView {
             VStack(spacing: Spacing.md) {
-                masterSwitchCard
-                if controller.status.captive {
-                    captiveBanner
+                if controller.refreshFailed {
+                    refreshNotice
                 }
+                masterSwitchCard
+                CaptivePortalBanner()
                 statusCard
                 if !controller.broadcast.isEmpty {
                     broadcastCard
@@ -152,58 +195,122 @@ struct TravelMateView: View {
         }
     }
 
-    // MARK: - Captive banner
+    // MARK: - Refresh notice
 
-    private var captiveBanner: some View {
+    /// Shown while the last refresh failed; the next poll is already retrying.
+    private var refreshNotice: some View {
         HStack(spacing: Spacing.sm) {
-            Image(systemName: "globe")
-                .foregroundStyle(theme.warning)
-            Text("Captive portal detected — open the portal page to get online.")
-                .font(.subheadline)
-                .foregroundStyle(theme.textPrimary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Button("Open") {
-                if let url = URL(string: "http://neverssl.com") {
-                    openURL(url)
-                }
-            }
-            .buttonStyle(.bordered)
-            .tint(theme.warning)
+            ProgressView()
+                .controlSize(.small)
+            Text("Couldn't refresh — retrying")
+                .font(.footnote)
+                .foregroundStyle(theme.textSecondary)
+            Spacer(minLength: 0)
         }
-        .padding(Spacing.md)
+        .padding(.horizontal, Spacing.md)
+        .padding(.vertical, Spacing.sm)
         .background(
-            theme.warning.opacity(0.15),
-            in: .rect(cornerRadius: CornerRadius.card, style: .continuous)
+            theme.warning.opacity(0.12),
+            in: .rect(cornerRadius: CornerRadius.small, style: .continuous)
         )
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: - Status
 
+    private struct StatusLook {
+        let title: String
+        let detail: String?
+        let color: Color
+        let glows: Bool
+    }
+
+    private func statusLook(for status: TravelmateStatus) -> StatusLook {
+        let network: String? = status.activeSsid.isEmpty ? nil : status.activeSsid
+        switch status.phase {
+        case .online:
+            return StatusLook(
+                title: "Online",
+                detail: network.map { "Connected to \($0)" },
+                color: theme.success,
+                glows: true)
+        case .signInNeeded:
+            return StatusLook(
+                title: "Hotel sign-in needed",
+                detail: network.map { "Connected to \($0). Sign in to get online." }
+                    ?? "Sign in to get online.",
+                color: theme.warning,
+                glows: false)
+        case .noInternet:
+            return StatusLook(
+                title: "Connected but no internet",
+                detail: network.map { "\($0) isn't passing any traffic. It may need a sign-in." },
+                color: theme.warning,
+                glows: false)
+        case .connecting:
+            return StatusLook(
+                title: "Connecting…",
+                detail: network.map { "Joining \($0)" } ?? "Trying your saved networks",
+                color: theme.accent,
+                glows: false)
+        case .notConnected:
+            return StatusLook(
+                title: "Not connected",
+                detail: notConnectedDetail(status),
+                color: theme.error,
+                glows: false)
+        }
+    }
+
+    /// Why there is no uplink, as far as the app can tell.
+    private func notConnectedDetail(_ status: TravelmateStatus) -> String? {
+        if !status.enabled { return "TravelMate is off." }
+        if status.hasError { return "TravelMate reported an error." }
+        if controller.uplinks.isEmpty { return "Add a network to get started." }
+        if controller.uplinks.contains(where: { !$0.enabled }) {
+            return "A saved network is paused. Tap Reconnect below."
+        }
+        return nil
+    }
+
     private var statusCard: some View {
         let status = controller.status
-        let connected = status.isConnected
+        let look = statusLook(for: status)
         return Card {
             VStack(alignment: .leading, spacing: Spacing.sm) {
                 HStack(spacing: Spacing.sm) {
-                    StatusDot(
-                        color: connected ? theme.success : theme.error,
-                        glows: connected
-                    )
-                    Text(connected ? "Connected to \(status.activeSsid)" : "Not connected")
-                        .font(.cardTitle)
-                        .foregroundStyle(theme.textPrimary)
-                }
-                if connected && !status.subnet.isEmpty {
-                    HStack(alignment: .firstTextBaseline, spacing: Spacing.sm) {
-                        Text("Uplink subnet")
-                            .font(.subheadline)
-                            .foregroundStyle(theme.textSecondary)
-                        Text(status.subnet)
-                            .font(.monospacedBody)
+                    if status.phase == .connecting {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        StatusDot(color: look.color, glows: look.glows)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(look.title)
+                            .font(.cardTitle)
                             .foregroundStyle(theme.textPrimary)
+                        if let detail = look.detail {
+                            Text(detail)
+                                .font(.subheadline)
+                                .foregroundStyle(theme.textSecondary)
+                        }
                     }
                 }
+                if status.isConnected && !status.subnet.isEmpty {
+                    subnetRow(status.subnet)
+                }
             }
+        }
+    }
+
+    private func subnetRow(_ subnet: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Spacing.sm) {
+            Text("Uplink subnet")
+                .font(.subheadline)
+                .foregroundStyle(theme.textSecondary)
+            Text(subnet)
+                .font(.monospacedBody)
+                .foregroundStyle(theme.textPrimary)
         }
     }
 
@@ -405,26 +512,26 @@ struct TravelMateView: View {
         let active = uplink.sectionId == controller.activeUplinkId
         let isDuplicate = controller.duplicateUplinkIds.contains(uplink.sectionId)
         return Card {
-            HStack(spacing: Spacing.sm) {
-                Image(systemName: active ? "wifi" : "wifi.slash")
-                    .foregroundStyle(active ? theme.success : theme.textSecondary)
-                VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                HStack(spacing: Spacing.sm) {
+                    Image(systemName: active ? "wifi" : "wifi.slash")
+                        .foregroundStyle(active ? theme.success : theme.textSecondary)
                     Text(uplink.ssid)
                         .font(.cardTitle)
                         .foregroundStyle(theme.textPrimary)
-                    if !uplink.enabled {
-                        Text("disabled")
-                            .font(.caption)
-                            .foregroundStyle(theme.textSecondary)
+                    bandChip(controller.deviceLabel(uplink.device))
+                    if isDuplicate {
+                        badge("Duplicate", color: theme.warning)
+                    }
+                    Spacer()
+                    if active {
+                        badge("Active", color: theme.success)
+                    } else if !uplink.enabled {
+                        badge("Paused", color: theme.warning)
                     }
                 }
-                bandChip(controller.deviceLabel(uplink.device))
-                if isDuplicate {
-                    badge("Duplicate", color: theme.warning)
-                }
-                Spacer()
-                if active {
-                    badge("Active", color: theme.success)
+                if !uplink.enabled {
+                    pausedNotice(uplink)
                 }
             }
         }
@@ -443,11 +550,40 @@ struct TravelMateView: View {
                 }
         )
         .contextMenu {
+            if !uplink.enabled {
+                Button {
+                    reconnect(uplink)
+                } label: {
+                    Label("Reconnect", systemImage: "arrow.clockwise")
+                }
+                .disabled(controller.isBusy)
+            }
             Button(role: .destructive) {
                 uplinkToForget = uplink
             } label: {
                 Label("Forget Network", systemImage: "trash")
             }
+        }
+    }
+
+    /// Travelmate stops trying a network after 3 failed connection attempts
+    /// and never resumes it on its own.
+    private func pausedNotice(_ uplink: TravelmateUplink) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            Text("TravelMate stops trying a network after 3 failed connection attempts.")
+                .font(.caption)
+                .foregroundStyle(theme.textSecondary)
+            Button {
+                Haptics.impact(.light)
+                reconnect(uplink)
+            } label: {
+                Label("Reconnect", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .tint(theme.accent)
+            .disabled(controller.isBusy)
+            .accessibilityLabel("Reconnect \(uplink.ssid)")
         }
     }
 
@@ -519,6 +655,29 @@ struct TravelMateView: View {
                 Haptics.warning()
                 appState.showToast(controller.error ?? "Action failed")
             }
+        }
+    }
+
+    private func reconnect(_ uplink: TravelmateUplink) {
+        guard let service = appState.service else { return }
+        Task {
+            let ok = await controller.reconnect(uplink, service: service)
+            if ok {
+                Haptics.success()
+                appState.showToast("Reconnecting to \(uplink.ssid)…")
+            } else {
+                Haptics.warning()
+                appState.showToast(controller.error ?? "Action failed")
+            }
+        }
+    }
+
+    private func pollWhileVisible() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled, appState.isAppActive, let service = appState.service
+            else { continue }
+            await controller.refreshStatus(service: service)
         }
     }
 }
