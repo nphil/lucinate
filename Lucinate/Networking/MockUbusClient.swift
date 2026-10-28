@@ -83,6 +83,11 @@ actor MockUbusClient: UbusCalling {
         "dnsmasq-full": ("2.90-r3", "2.91-r1"),
         "busybox": ("1.37.0-r4", "1.37.0-r4"),
         "dropbear": ("2025.88-r2", "2025.88-r2"),
+        // Phone Data's software, already installed (see `phoneDataPackages`).
+        "kmod-usb-net-ipheth": ("6.12.74-r1", "6.12.74-r1"),
+        "usbmuxd": ("1.1.1-r4", "1.1.1-r4"),
+        "kmod-wireguard": ("6.12.74-r1", "6.12.74-r1"),
+        "wireguard-tools": ("1.0.20250521-r1", "1.0.20250521-r1"),
     ]
 
     init() {}
@@ -136,6 +141,8 @@ actor MockUbusClient: UbusCalling {
 
         case "file.read":
             return fileRead(path: params["path"].stringValue ?? "")
+        case "file.list":
+            return try fileList(path: params["path"].stringValue ?? "")
         case "file.exec":
             return .object(["stdout": .string(""), "stderr": .string(""), "code": .number(0)])
 
@@ -219,6 +226,17 @@ actor MockUbusClient: UbusCalling {
             return try reply(
                 "(1/1) Upgrading \(params[1]) (\(entry.installed) -> \(entry.available))\n"
                     + "OK: 214 MiB in 187 packages")
+        case "install":
+            // Feel like a real install; names the demo doesn't know get a plausible version.
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            let names = Array(params.dropFirst())
+            for name in names where mockPackages[name] == nil {
+                mockPackages[name] = ("1.0.0-r1", "1.0.0-r1")
+            }
+            let installing = names.enumerated().map {
+                "(\($0.offset + 1)/\(names.count)) Installing \($0.element) (1.0.0-r1)"
+            }
+            return try reply(installing.joined(separator: "\n") + "\nOK: 214 MiB in 190 packages")
         default:
             return try reply("", code: 1)
         }
@@ -433,7 +451,12 @@ actor MockUbusClient: UbusCalling {
         guard let config = params["config"].stringValue,
             let section = params["section"].stringValue
         else { return }
-        uciConfigs[config]?.removeValue(forKey: section)
+        // With an `option` only that option goes; without one the whole section does.
+        if let option = params["option"].stringValue {
+            uciConfigs[config]?[section]?.removeValue(forKey: option)
+        } else {
+            uciConfigs[config]?.removeValue(forKey: section)
+        }
     }
 
     private static func initialUciConfigs() -> [String: [String: [String: JSONValue]]] {
@@ -642,6 +665,7 @@ actor MockUbusClient: UbusCalling {
                 "mtu_fix": .string("1"),
                 "network": .array([
                     .string("wan"), .string("wan6"), .string("wanb"), .string("travel_wan"),
+                    .string("phone_usb"), .string("phone_wg"),
                 ]),
             ],
             "cfg04ad58": [
@@ -650,6 +674,42 @@ actor MockUbusClient: UbusCalling {
                 ".name": .string("cfg04ad58"),
                 "src": .string("lan"),
                 "dest": .string("wan"),
+            ],
+        ]
+
+        // ---- network (only what Phone Data reads: an iPhone sharing its data over USB) ----
+        configs["network"] = [
+            "phone_usb": [
+                ".anonymous": .bool(false),
+                ".type": .string("interface"),
+                ".name": .string("phone_usb"),
+                "proto": .string("dhcp"),
+                "device": .string("eth2"),
+                "defaultroute": .string("0"),
+                "peerdns": .string("0"),
+            ],
+            "phone_wg": [
+                ".anonymous": .bool(false),
+                ".type": .string("interface"),
+                ".name": .string("phone_wg"),
+                "proto": .string("wireguard"),
+                "private_key": .string("bW9ja19yb3V0ZXJfcHJpdl9rZXlfZGVtb19vbmx5ISE="),
+                "addresses": .array([.string("10.7.0.2/32")]),
+                "mtu": .string("1420"),
+                "tunlink": .string("phone_usb"),
+                "dns": .array([.string("1.1.1.1")]),
+            ],
+            "phone_wg_peer": [
+                ".anonymous": .bool(false),
+                ".type": .string("wireguard_phone_wg"),
+                ".name": .string("phone_wg_peer"),
+                "description": .string("Lucinate Phone Data"),
+                "public_key": .string("bW9ja19waG9uZV9wdWJsaWNfa2V5X2Zvcl9kZW1vISE="),
+                "endpoint_host": .string("172.20.10.1"),
+                "endpoint_port": .string("51820"),
+                "allowed_ips": .array([.string("0.0.0.0/1"), .string("128.0.0.0/1")]),
+                "route_allowed_ips": .string("1"),
+                "persistent_keepalive": .string("25"),
             ],
         ]
 
@@ -677,6 +737,35 @@ actor MockUbusClient: UbusCalling {
             return .object(["data": .string(Self.travelmateRuntime)])
         }
         return .object(["data": .string("")])
+    }
+
+    /// `file list` on a router with an iPhone plugged into its USB port: the `ipheth` driver
+    /// is bound to one USB interface, whose network device is eth2. Any other path isn't there.
+    private func fileList(path: String) throws -> JSONValue {
+        func entries(_ items: [(name: String, type: String)]) -> JSONValue {
+            JSONValue.object([
+                "entries": JSONValue.array(
+                    items.map {
+                        JSONValue.object(["name": .string($0.name), "type": .string($0.type)])
+                    })
+            ])
+        }
+        switch path {
+        case "/sys/bus/usb/drivers/ipheth":
+            return entries([
+                (name: "1-1:4.2", type: "symlink"),
+                (name: "bind", type: "file"),
+                (name: "module", type: "symlink"),
+                (name: "new_id", type: "file"),
+                (name: "remove_id", type: "file"),
+                (name: "uevent", type: "file"),
+                (name: "unbind", type: "file"),
+            ])
+        case "/sys/bus/usb/drivers/ipheth/1-1:4.2/net":
+            return entries([(name: "eth2", type: "directory")])
+        default:
+            throw UbusError.ubusStatus(4, "not found")
+        }
     }
 
     // MARK: - wireguard
@@ -855,7 +944,8 @@ actor MockUbusClient: UbusCalling {
         ])
     }
 
-    /// Mirrors assets/mock/interface_dump.json (wan, wan6, wanb, lan, guest).
+    /// Mirrors assets/mock/interface_dump.json (wan, wan6, wanb, lan, guest), plus Phone Data:
+    /// an iPhone on USB (eth2, address from its hotspot) and the tunnel through it.
     private static let interfaceDump: JSONValue = .object([
         "interface": .array([
             interfaceEntry(
@@ -877,6 +967,14 @@ actor MockUbusClient: UbusCalling {
             interfaceEntry(
                 name: "guest", up: true, available: true, proto: "static", device: "br-guest",
                 ipv4: [("192.168.50.1", 24)], ipv6: [], routes: [], dns: []),
+            interfaceEntry(
+                name: "phone_usb", up: true, available: true, proto: "dhcp", device: "eth2",
+                ipv4: [("172.20.10.2", 28)], ipv6: [], routes: [], dns: []),
+            interfaceEntry(
+                name: "phone_wg", up: true, available: true, proto: "wireguard",
+                device: "phone_wg", ipv4: [("10.7.0.2", 32)], ipv6: [],
+                routes: [("0.0.0.0", 1, "0.0.0.0"), ("128.0.0.0", 1, "0.0.0.0")],
+                dns: ["1.1.1.1"]),
         ])
     ])
 

@@ -413,6 +413,8 @@ final class AppState {
             selectedRouterID = routers.first?.id
         }
         saveRouters()
+        // The phone stops letting that router in; otherwise its entry keeps the engine armed.
+        PhoneDataController.shared.forgetRouter(routerID: id)
     }
 
     /// Re-keys a saved router whose address or username changed, in place. The
@@ -432,6 +434,7 @@ final class AppState {
         routers[index] = replacement
         if selectedRouterID == oldID { selectedRouterID = replacement.id }
         saveRouters()
+        PhoneDataController.shared.renameRouter(from: oldID, to: replacement.id)
         return true
     }
 

@@ -88,6 +88,19 @@ struct RouterService: Sendable {
             ]))
     }
 
+    /// `uciSet` for values that aren't all strings: a `list` option is an array, which
+    /// replaces the option's whole list. `section` must exist (the router refuses to set
+    /// a missing one).
+    func uciSet(config: String, section: String, values: [String: JSONValue]) async throws {
+        _ = try await transport.call(
+            "uci", "set",
+            .object([
+                "config": .string(config),
+                "section": .string(section),
+                "values": .object(values),
+            ]))
+    }
+
     func uciAdd(config: String, type: String, name: String? = nil, values: [String: String])
         async throws
     {
@@ -102,10 +115,34 @@ struct RouterService: Sendable {
         _ = try await transport.call("uci", "add", .object(params))
     }
 
+    /// `uciAdd` for values that aren't all strings: a `list` option is an array.
+    func uciAdd(config: String, type: String, name: String? = nil, values: [String: JSONValue])
+        async throws
+    {
+        var params: [String: JSONValue] = [
+            "config": .string(config),
+            "type": .string(type),
+            "values": .object(values),
+        ]
+        if let name { params["name"] = .string(name) }
+        _ = try await transport.call("uci", "add", .object(params))
+    }
+
     func uciDelete(config: String, section: String) async throws {
         _ = try await transport.call(
             "uci", "delete",
             .object(["config": .string(config), "section": .string(section)]))
+    }
+
+    /// Drops one option of a section (`uciDelete` drops the whole section).
+    func uciDeleteOption(config: String, section: String, option: String) async throws {
+        _ = try await transport.call(
+            "uci", "delete",
+            .object([
+                "config": .string(config),
+                "section": .string(section),
+                "option": .string(option),
+            ]))
     }
 
     func uciCommit(config: String) async throws {
@@ -147,6 +184,12 @@ struct RouterService: Sendable {
     func fileRead(path: String) async throws -> String {
         let result = try await transport.call("file", "read", .object(["path": .string(path)]))
         return result["data"].stringValue ?? ""
+    }
+
+    /// `file list`: `{"entries": [{"name", "type", ...}]}` for a directory. A missing
+    /// directory is `UbusError.ubusStatus(4, …)`.
+    func fileList(path: String) async throws -> JSONValue {
+        try await transport.call("file", "list", .object(["path": .string(path)]))
     }
 
     func fileExec(command: String, params: [String] = []) async throws -> JSONValue {
@@ -197,9 +240,10 @@ struct RouterService: Sendable {
     }
 
     /// LuCI's package wrapper. luci-app-package-manager's rpcd ACL grants
-    /// exec on exactly `list-installed`, `list-available`, `update` and
-    /// `upgrade *` here; `/usr/bin/apk` itself is never granted. The wrapper
-    /// silently drops `-` flags, so never pass options like `--simulate`.
+    /// exec on exactly `list-installed`, `list-available`, `update`,
+    /// `install *` and `upgrade *` here (plus `remove *`, which nothing here
+    /// uses); `/usr/bin/apk` itself is never granted. The wrapper silently
+    /// drops `-` flags, so never pass options like `--simulate`.
     private static let packageManagerCall = "/usr/libexec/package-manager-call"
 
     func packageManagerSupport() async -> PackageManagerSupport {
@@ -243,6 +287,13 @@ struct RouterService: Sendable {
     /// apk needs for it).
     func upgradePackage(_ name: String) async throws -> ExecResult {
         try await packageManagerCommand(["upgrade", name])
+    }
+
+    /// `apk add <names>` — install packages (plus whatever dependencies apk needs). The
+    /// router's package lock lets only one package command run at a time; a second one
+    /// waits for the first.
+    func installPackages(_ names: [String]) async throws -> ExecResult {
+        try await packageManagerCommand(["install"] + names)
     }
 
     func installedPackages() async throws -> [PackageCatalog.Entry] {
