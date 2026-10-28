@@ -228,4 +228,31 @@ final class PhoneDataKeysTests: XCTestCase {
         XCTAssertEqual(secrets.saves, 1)
         XCTAssertEqual(store.peers.map(\.routerID), ["a"])
     }
+
+    func testAKeychainThatFailsForOtherReasonsIsNotReportedAsLocked() throws {
+        let secrets = FakeSecrets()
+        secrets.loadError = PhoneDataSecretFailure(code: -34018, lockedForNow: false)
+        let store = PhoneDataKeyStore(secrets: secrets)
+        XCTAssertEqual(store.problem, .keychainFailed(-34018))
+        assertThrows(.keychainFailed(-34018), try store.prepareRouter(routerID: "a"))
+        XCTAssertNil(secrets.data)
+
+        secrets.loadError = PhoneDataSecretFailure(code: -25308, lockedForNow: true)
+        store.load()
+        XCTAssertEqual(store.problem, .keysLocked)
+    }
+
+    func testARenamedRouterKeepsItsKeyAndAddress() throws {
+        var keys = try makeKeys(routers: ["a", "b", "c"])
+        let before = keys.peers[1]
+        keys.renameRouter(from: "b", to: "b2")
+        XCTAssertEqual(keys.peers.map(\.routerID), ["a", "b2", "c"])
+        XCTAssertEqual(keys.peers[1].publicKey, before.publicKey)
+        XCTAssertEqual(keys.peers[1].address, before.address)
+
+        // Onto an id that already has an entry: the renamed router's keys win, no duplicate.
+        keys.renameRouter(from: "b2", to: "a")
+        XCTAssertEqual(keys.peers.map(\.routerID), ["a", "c"])
+        XCTAssertEqual(keys.peers[0].publicKey, before.publicKey)
+    }
 }

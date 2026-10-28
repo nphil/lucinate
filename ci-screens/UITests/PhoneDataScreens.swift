@@ -40,10 +40,26 @@ final class PhoneDataScreens: XCTestCase {
             sleep(4)
             shot(app, "\(tag)-3-after-fix")
         }
-        app.swipeUp()
-        sleep(1)
-        shot(app, "\(tag)-4-phone-data-middle")
-        app.swipeUp()
+        let remove = app.buttons.containing(NSPredicate(format: "label CONTAINS 'Remove from Router'")).firstMatch
+        for _ in 0..<4 where !remove.isHittable { app.swipeUp() }
+        if remove.exists {
+            remove.tap()
+            let confirm = app.alerts.buttons["Remove"]
+            if confirm.waitForExistence(timeout: 5) { confirm.tap() }
+            sleep(4)
+            for _ in 0..<4 { app.swipeDown() }
+            shot(app, "\(tag)-3b-setup-checklist")
+            app.swipeUp()
+            shot(app, "\(tag)-3c-setup-checklist-scrolled")
+            let finish = app.buttons.containing(NSPredicate(format: "label CONTAINS 'Finish'")).firstMatch
+            if finish.exists {
+                finish.tap()
+                sleep(4)
+                for _ in 0..<4 { app.swipeDown() }
+                shot(app, "\(tag)-3d-after-finish")
+            }
+        }
+        for _ in 0..<4 { app.swipeDown() }
         sleep(1)
         shot(app, "\(tag)-5-phone-data-bottom")
 

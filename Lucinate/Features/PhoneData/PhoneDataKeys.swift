@@ -33,6 +33,8 @@ enum PhoneDataKeyError: Error, Equatable, LocalizedError {
     case keysLocked
     /// Something is saved, but not in a form this version can use.
     case keysNeedReset
+    /// The Keychain refused for another reason than being locked; the code is its OSStatus.
+    case keychainFailed(Int32)
     case cannotSave
     /// All 253 tunnel addresses belong to routers already.
     case noFreeAddress
@@ -42,6 +44,8 @@ enum PhoneDataKeyError: Error, Equatable, LocalizedError {
         case .keysLocked: "Unlock this iPhone once so Lucinate can read its keys."
         case .keysNeedReset:
             "Lucinate can't read the Phone Data keys saved on this iPhone. Start over with new keys, then set up your routers again."
+        case .keychainFailed(let code):
+            "This iPhone's Keychain won't give Lucinate its Phone Data keys (error \(code)). Restart the iPhone, then try again."
         case .cannotSave: "Lucinate couldn't save the Phone Data keys on this iPhone. Try again."
         case .noFreeAddress: "This iPhone is already set up with 253 routers. Remove one first."
         }
@@ -127,6 +131,14 @@ protocol PhoneDataSecretStore: AnyObject {
     func save(_ data: Data) throws
 }
 
+/// What a secret store throws when it can't answer. Only `lockedForNow` is worth waiting out
+/// (after a restart, until the first unlock); anything else is reported with its code.
+struct PhoneDataSecretFailure: Error, Equatable, CustomStringConvertible {
+    let code: Int32
+    let lockedForNow: Bool
+    var description: String { "Keychain error \(code)" }
+}
+
 /// The saved keys. Nothing saved is fine and stays that way until the first router is set up, which
 /// makes the iPhone's key. Anything else that goes wrong leaves the saved keys alone: nothing is
 /// saved and no router can be added, so a Keychain that is locked for now, or keys this version
@@ -165,6 +177,8 @@ final class PhoneDataKeyStore {
             }
             keys = saved
             problem = nil
+        } catch let failure as PhoneDataSecretFailure where !failure.lockedForNow {
+            problem = .keychainFailed(failure.code)
         } catch {
             problem = .keysLocked
         }

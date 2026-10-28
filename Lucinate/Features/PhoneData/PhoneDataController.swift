@@ -452,11 +452,6 @@ final class PhoneDataController {
 /// lock out every router set up with the old one. It has a service of its own, so it never mixes
 /// with the router logins `KeychainStore` keeps.
 final class PhoneDataKeychain: PhoneDataSecretStore {
-    struct Failure: Error, CustomStringConvertible {
-        let status: OSStatus
-        var description: String { "Keychain error \(status)" }
-    }
-
     private let service = "app.cogwheel.lucimobile.phonedata"
     private let account = "keys"
     /// A locked Keychain is asked again every few seconds. The log says so once, not each time.
@@ -485,7 +480,7 @@ final class PhoneDataKeychain: PhoneDataSecretStore {
             lastLoadFailure = nil
             return nil
         default:
-            throw loadFailure(status) // errSecInteractionNotAllowed: locked since a restart, for example
+            throw loadFailure(status)
         }
     }
 
@@ -501,15 +496,16 @@ final class PhoneDataKeychain: PhoneDataSecretStore {
         }
         guard status == errSecSuccess else {
             phoneDataLogger.info("The keys couldn't be saved, Keychain status \(status, privacy: .public)")
-            throw Failure(status: status)
+            throw PhoneDataSecretFailure(code: status, lockedForNow: false)
         }
     }
 
-    private func loadFailure(_ status: OSStatus) -> Failure {
+    private func loadFailure(_ status: OSStatus) -> PhoneDataSecretFailure {
         if status != lastLoadFailure {
             lastLoadFailure = status
             phoneDataLogger.info("The keys couldn't be read, Keychain status \(status, privacy: .public)")
         }
-        return Failure(status: status)
+        // Locked since a restart, until the first unlock: worth waiting out. Anything else isn't.
+        return PhoneDataSecretFailure(code: status, lockedForNow: status == errSecInteractionNotAllowed)
     }
 }
