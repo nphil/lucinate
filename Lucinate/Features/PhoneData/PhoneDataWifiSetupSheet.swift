@@ -73,7 +73,7 @@ struct PhoneDataWifiSetupSheet: View {
                     if newID != nil { revealPassword(proxy) }
                 }
                 .onChange(of: isManual) { _, nowManual in
-                    if nowManual { revealName() }
+                    if nowManual { revealName(proxy) }
                 }
                 // The keyboard takes a moment to rise; scrolling before it has would measure
                 // against the full-height list and leave the field behind it.
@@ -580,22 +580,29 @@ struct PhoneDataWifiSetupSheet: View {
 
     /// Brings the password into view and, for a secured network, puts the cursor in it; the
     /// focus change then scrolls once the keyboard is up. The row is added by the same update
-    /// that picked the network, so both wait for it to lay out.
+    /// that picked the network, so both wait for it to lay out. The row is scrolled in first: the
+    /// list is lazy, and a field that hasn't been built yet can't take the cursor.
     private func revealPassword(_ proxy: ScrollViewProxy) {
         Task {
             try? await Task.sleep(for: .milliseconds(250))
-            if needsPassword, !passwordFocused {
-                passwordFocused = true
-            } else {
-                scroll(proxy, to: Self.passwordRowID, afterKeyboard: false)
+            withAnimation(.snappy) {
+                proxy.scrollTo(Self.passwordRowID, anchor: Self.fieldAnchor)
             }
+            guard needsPassword, !passwordFocused else { return }
+            try? await Task.sleep(for: .milliseconds(150))
+            passwordFocused = true
         }
     }
 
-    /// Puts the cursor in the name field once the row is there; the focus change scrolls to it.
-    private func revealName() {
+    /// Puts the cursor in the name field once the row is there (scrolled in first, as above); the
+    /// focus change then scrolls it clear of the keyboard.
+    private func revealName(_ proxy: ScrollViewProxy) {
         Task {
             try? await Task.sleep(for: .milliseconds(250))
+            withAnimation(.snappy) {
+                proxy.scrollTo(Self.nameRowID, anchor: Self.fieldAnchor)
+            }
+            try? await Task.sleep(for: .milliseconds(150))
             nameFocused = true
         }
     }
