@@ -95,7 +95,7 @@ Swift toolchain.
 | 4 | Tier A: Control Center quick toggles, Wi-Fi AP editor, DHCP static leases, client actions (Reserve IP / WoL / block) | ✅ green |
 | 5 | Tier B: port forwards + firewall rule toggles, system/kernel log viewer, ping diagnostic | ✅ green |
 | 6 | Polish pass + this README | ✅ |
-| 7 | Phone Data over USB: Go engine, router setup, TravelMate card + screen, Shortcuts | 🚧 CI |
+| 7 | Phone Data over USB: Go engine, router setup, TravelMate card + screen, Shortcuts | ✅ green (real-router test pending) |
 
 ### Not done (Tier C / known gaps)
 
