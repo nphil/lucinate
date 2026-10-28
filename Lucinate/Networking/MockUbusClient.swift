@@ -54,6 +54,9 @@ actor MockUbusClient: UbusCalling {
     /// In-memory uci store: config -> section name -> option -> value.
     /// uci set/add/delete mutate it so reviewer-mode edits appear to stick.
     private var uciConfigs: [String: [String: [String: JSONValue]]] = MockUbusClient.initialUciConfigs()
+    /// config -> section names in file order, which `uci get` reports as `.index` and
+    /// `uci order` rewrites. Sections it doesn't list follow in name order.
+    private var uciOrders: [String: [String]] = MockUbusClient.initialUciOrders()
     private var uciAnonymousCounter = 0x06_00_00
 
     /// Persisted tailscale settings; set_settings merges form_data into this.
@@ -137,6 +140,12 @@ actor MockUbusClient: UbusCalling {
             uciDelete(params)
             return .object([:])
         case "uci.commit":
+            return .object([:])
+        case "uci.revert":
+            // Edits apply at once here, so there is nothing staged to drop.
+            return .object([:])
+        case "uci.order":
+            uciOrder(params)
             return .object([:])
 
         case "file.read":
@@ -398,11 +407,23 @@ actor MockUbusClient: UbusCalling {
 
     // MARK: - uci (mutable in-memory store)
 
+    /// The config's section names in file order: the ones `uci order` or `uci add` placed, then
+    /// any the order doesn't know, by name.
+    private func orderedSectionNames(_ config: String) -> [String] {
+        let sections = uciConfigs[config] ?? [:]
+        let known = (uciOrders[config] ?? []).filter { sections[$0] != nil }
+        let rest = sections.keys.filter { !known.contains($0) }.sorted()
+        return known + rest
+    }
+
     private func uciGet(_ params: JSONValue) -> JSONValue {
         let config = params["config"].stringValue ?? ""
         let sections = uciConfigs[config] ?? [:]
         var values: [String: JSONValue] = [:]
-        for (name, options) in sections {
+        // `.index` is a section's place in the file, as a real router reports it.
+        for (index, name) in orderedSectionNames(config).enumerated() {
+            var options = sections[name] ?? [:]
+            options[".index"] = .number(Double(index))
             values[name] = .object(options)
         }
         return .object(["values": .object(values)])
@@ -441,6 +462,11 @@ actor MockUbusClient: UbusCalling {
                 section[key] = value
             }
         }
+        // A new section goes last.
+        var order = orderedSectionNames(config)
+        order.removeAll { $0 == name }
+        order.append(name)
+        uciOrders[config] = order
         var sections = uciConfigs[config] ?? [:]
         sections[name] = section
         uciConfigs[config] = sections
@@ -456,7 +482,32 @@ actor MockUbusClient: UbusCalling {
             uciConfigs[config]?[section]?.removeValue(forKey: option)
         } else {
             uciConfigs[config]?.removeValue(forKey: section)
+            uciOrders[config]?.removeAll { $0 == section }
         }
+    }
+
+    /// `uci order`: the listed sections move to the front in that order, the others follow in the
+    /// order they had.
+    private func uciOrder(_ params: JSONValue) {
+        guard let config = params["config"].stringValue,
+            let requested = params["sections"].arrayValue?.compactMap({ $0.stringValue })
+        else { return }
+        let existing = uciConfigs[config] ?? [:]
+        let listed = requested.filter { existing[$0] != nil }
+        uciOrders[config] = listed + orderedSectionNames(config).filter { !listed.contains($0) }
+    }
+
+    private static func initialUciOrders() -> [String: [String]] {
+        [
+            "wireless": [
+                "radio0", "radio1", "default_radio0", "default_radio1", "trm_uplink1",
+                "trm_uplink2",
+            ],
+            "travelmate": ["global", "cfg047f11", "cfg05aa02"],
+            "firewall": ["cfg01e63d", "cfg02dc81", "cfg03dc81", "cfg04ad58"],
+            "network": ["phone_usb", "phone_wg", "phone_wg_peer"],
+            "dhcp": ["cfg01411c", "lan", "guest", "wan", "odhcpd"],
+        ]
     }
 
     private static func initialUciConfigs() -> [String: [String: [String: JSONValue]]] {
@@ -1060,6 +1111,10 @@ actor MockUbusClient: UbusCalling {
             ]
         case "radio1":
             entries = [
+                // The iPhone's Personal Hotspot, for Phone Data's Wi-Fi setup.
+                scanEntry(
+                    ssid: "Nitin's iPhone", bssid: "FE:4D:3A:91:2C:07", band: 5,
+                    channel: 157, signal: -38, quality: 66, security: .saeMixed),
                 scanEntry(
                     ssid: "Hotel-Aurora-Guest-5G", bssid: "DE:AD:BE:EF:20:02", band: 5,
                     channel: 44, signal: -55, quality: 49, security: .psk2),
@@ -1083,6 +1138,8 @@ actor MockUbusClient: UbusCalling {
         case open
         case psk2
         case sae
+        /// WPA2 and WPA3 together, which is how an iPhone's hotspot shows up.
+        case saeMixed
     }
 
     private static func scanEntry(
@@ -1106,6 +1163,13 @@ actor MockUbusClient: UbusCalling {
                 "wpa": .array([.number(3)]),
                 "authentication": .array([.string("sae")]),
                 "description": .string("WPA3 SAE (CCMP)"),
+            ])
+        case .saeMixed:
+            encryption = .object([
+                "enabled": .bool(true),
+                "wpa": .array([.number(2), .number(3)]),
+                "authentication": .array([.string("psk"), .string("sae")]),
+                "description": .string("WPA2/WPA3 PSK/SAE (CCMP)"),
             ])
         }
         return .object([

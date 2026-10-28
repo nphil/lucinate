@@ -195,6 +195,20 @@ final class TravelmateStatusTests: XCTestCase {
         XCTAssertEqual(pinned.device, "radio1")
     }
 
+    func testOnlyThePhoneDataTunnelMarksAnUplinkAsPhoneData() throws {
+        func uplink(_ body: String) throws -> TravelmateUplink {
+            TravelmateUplink.fromUci(sectionId: "cfg1", try json(body))
+        }
+        XCTAssertTrue(
+            try uplink(#"{"ssid":"iPhone","device":"radio0","vpn":"1","vpniface":"phone_wifi"}"#)
+                .carriesPhoneData)
+        // The owner's own VPN on a hotel network is not Phone Data.
+        XCTAssertFalse(
+            try uplink(#"{"ssid":"Hotel","device":"radio0","vpn":"1","vpniface":"wg0"}"#)
+                .carriesPhoneData)
+        XCTAssertFalse(try uplink(#"{"ssid":"Hotel","device":"radio0"}"#).carriesPhoneData)
+    }
+
     func testSavedMatchSameRadio() {
         let uplinks = [
             TravelmateUplink(sectionId: "a", ssid: "Hotel", device: "radio0", enabled: false),

@@ -39,7 +39,7 @@ enum PhoneDataShortcutReply {
         switch state {
         case .waitingForHotspot:
             let minutes = Int(KeepAlivePolicy.grace / 60)
-            return "Ready. Plug your iPhone into the router with Personal Hotspot on. Lucinate waits \(minutes) minutes."
+            return "Ready. Turn on Personal Hotspot, and plug in the USB cable if your router uses it. Lucinate waits \(minutes) minutes."
         case .waitingForRouter:
             return "Ready. Waiting for your router to connect."
         case .sharing, .notSetUp, .problem:
@@ -54,7 +54,7 @@ enum PhoneDataShortcutReply {
         case .problem(let why):
             return "Phone Data isn't working. \(why)"
         case .waitingForHotspot:
-            return "Phone Data is off. Plug your iPhone into the router with Personal Hotspot on."
+            return "Phone Data is off. Turn on Personal Hotspot, and plug in the USB cable if your router uses it."
         case .waitingForRouter:
             return "Phone Data is ready. Waiting for your router to connect."
         case .sharing(let routers):

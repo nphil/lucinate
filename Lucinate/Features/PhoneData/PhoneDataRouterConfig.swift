@@ -5,6 +5,8 @@ import Foundation
 /// What the router says about Phone Data, read in one go by
 /// `RouterService.phoneDataState()`.
 struct PhoneDataRouterState: Equatable, Sendable {
+    // MARK: USB cable
+
     /// The packages of `RouterService.phoneDataPackages` that aren't installed yet.
     var missingPackages: [String]
     /// The USB and tunnel interfaces and the phone's tunnel peer all exist, and both
@@ -21,7 +23,69 @@ struct PhoneDataRouterState: Equatable, Sendable {
     /// `phone_wg` is up.
     var tunnelUp: Bool
 
+    // MARK: Wi-Fi
+
+    /// TravelMate (the `travelmate` package) is on the router: its config exists. Wi-Fi sharing
+    /// hands the iPhone's hotspot to it, so without it Wi-Fi can't be set up.
+    var travelmateInstalled: Bool = false
+    /// `phone_wifi`, its phone peer, its place in the `wan` firewall zone, and a TravelMate
+    /// uplink for the iPhone's hotspot (with the Wi-Fi station behind it) all exist.
+    var wifiConfigured: Bool = false
+    /// Name of the iPhone's hotspot, as saved on its TravelMate uplink.
+    var wifiSSID: String?
+    /// Public key (base64) of the phone the Wi-Fi tunnel's peer points at.
+    var wifiPhonePublicKey: String?
+    /// `phone_wifi` is up. TravelMate raises it once the router has joined the hotspot.
+    var wifiTunnelUp: Bool = false
+    /// TravelMate is connected to the iPhone's hotspot right now.
+    var wifiUplinkActive: Bool = false
+    /// The packages of `RouterService.phoneDataWifiPackages` that aren't installed yet.
+    var missingWifiPackages: [String] = []
+
     var packagesInstalled: Bool { missingPackages.isEmpty }
+    var wifiPackagesInstalled: Bool { missingWifiPackages.isEmpty }
+
+    /// Both lists, to hand back to `RouterService.phoneDataState` so a poll can skip reading the
+    /// router's package list.
+    var missing: PhoneDataMissingPackages {
+        PhoneDataMissingPackages(usb: missingPackages, wifi: missingWifiPackages)
+    }
+
+    /// Notes that Wi-Fi sharing was just set up for the hotspot `ssid` and the phone with
+    /// `phonePublicKey`, for when the router can't be read back: it may already have left the
+    /// iPhone's Wi-Fi for the hotspot. What was saved is known all the same.
+    mutating func recordWifiSetup(ssid: String, phonePublicKey: String) {
+        travelmateInstalled = true
+        wifiConfigured = true
+        wifiSSID = ssid
+        wifiPhonePublicKey = phonePublicKey
+        missingWifiPackages = []
+    }
+}
+
+/// What the router lacks of each set of software. One listing of the router's installed packages
+/// answers both, so they are read and remembered together.
+struct PhoneDataMissingPackages: Equatable, Sendable {
+    /// Of `RouterService.phoneDataPackages`.
+    var usb: [String]
+    /// Of `RouterService.phoneDataWifiPackages`.
+    var wifi: [String]
+}
+
+/// A Wi-Fi network the router can see, offered as the iPhone's Personal Hotspot.
+struct PhoneDataHotspot: Equatable, Sendable {
+    let ssid: String
+    /// The radio that saw it ("radio0"): the one the router would join it with.
+    let device: String
+    /// The uci `encryption` value to join it with ("psk2", "sae-mixed", ...).
+    let encryption: String
+    /// Signal strength in dBm; nil when the router didn't say.
+    let signal: Int?
+    /// "2.4 GHz", "5 GHz"; nil when unknown.
+    let band: String?
+
+    /// An iPhone names its hotspot after its owner's iPhone ("Nitin's iPhone") until renamed.
+    var looksLikeIPhone: Bool { ssid.localizedCaseInsensitiveContains("iphone") }
 }
 
 // MARK: - Errors
@@ -46,6 +110,8 @@ enum PhoneDataRouterError: LocalizedError, Equatable {
     case pairingRestartNotAllowed
     /// Restarting the iPhone connection ran but failed.
     case pairingRestartFailed
+    /// Wi-Fi sharing joins the iPhone's hotspot with TravelMate, and the router doesn't have it.
+    case travelmateMissing
 
     var errorDescription: String? {
         switch self {
@@ -70,6 +136,9 @@ enum PhoneDataRouterError: LocalizedError, Equatable {
                 + "Unplug the iPhone and plug it back in instead."
         case .pairingRestartFailed:
             return "The router couldn't restart its connection to the iPhone."
+        case .travelmateMissing:
+            return "Wi-Fi sharing needs TravelMate on the router, and it isn't installed. "
+                + "Install the travelmate package on the router, then try again."
         }
     }
 }
@@ -94,8 +163,11 @@ enum PhoneDataUciEdit: Equatable, Sendable {
 struct PhoneDataConfigPlan: Equatable, Sendable {
     var network: [PhoneDataUciEdit] = []
     var firewall: [PhoneDataUciEdit] = []
+    /// TravelMate's own settings (its global section). The iPhone's uplink and its Wi-Fi
+    /// station are saved and removed the way TravelMate's tab does it, not planned here.
+    var travelmate: [PhoneDataUciEdit] = []
 
-    var isEmpty: Bool { network.isEmpty && firewall.isEmpty }
+    var isEmpty: Bool { network.isEmpty && firewall.isEmpty && travelmate.isEmpty }
 }
 
 // MARK: - Config logic
@@ -118,6 +190,24 @@ enum PhoneDataRouterConfig {
     static let peerDescription = "Lucinate Phone Data"
     /// The firewall zone that masquerades traffic to the internet.
     static let wanZoneName = "wan"
+
+    /// uci section and interface of the WireGuard tunnel carried over the iPhone's Wi-Fi hotspot.
+    static let wifiInterface = "phone_wifi"
+    /// The Wi-Fi tunnel's single peer: the phone.
+    static let wifiPeerSection = "phone_wifi_peer"
+    static let wifiPeerSectionType = "wireguard_phone_wifi"
+    /// Higher than the USB tunnel's, so while both are up the cable carries the traffic.
+    static let wifiMetric = 10
+    /// What travelmate is told the tunnel is, and which interface it raises after joining the
+    /// iPhone's hotspot (and takes down again on any other uplink).
+    static let wifiVpnService = "wireguard"
+    /// The options of the iPhone's travelmate uplink that hook the Wi-Fi tunnel up to it.
+    static let wifiUplinkValues: [String: String] = [
+        "vpn": "1", "vpnservice": wifiVpnService, "vpniface": wifiInterface,
+    ]
+    /// TravelMate's own settings are the one section of this type (`global`).
+    static let travelmateSectionType = "travelmate"
+    static let travelmateGlobalSection = "global"
 
     /// The iPhone's side of its USB link, and where Lucinate's WireGuard server listens.
     static let hotspotHost = "172.20.10.1"
@@ -167,10 +257,52 @@ enum PhoneDataRouterConfig {
     /// Sections of the phone's peer type in a `uci get network` result, the one named
     /// `phone_wg_peer` first.
     static func peerSections(in network: JSONValue) -> [String] {
+        peerSections(in: network, type: peerSectionType, preferredName: peerSection)
+    }
+
+    /// Sections of the Wi-Fi tunnel's peer type, the one named `phone_wifi_peer` first.
+    static func wifiPeerSections(in network: JSONValue) -> [String] {
+        peerSections(in: network, type: wifiPeerSectionType, preferredName: wifiPeerSection)
+    }
+
+    private static func peerSections(
+        in network: JSONValue, type: String, preferredName: String
+    ) -> [String] {
         let names = TravelmateConfig.orderedSections(network)
-            .filter { $0.section[".type"].stringValue == peerSectionType }
+            .filter { $0.section[".type"].stringValue == type }
             .map { $0.name }
-        return names.filter { $0 == peerSection } + names.filter { $0 != peerSection }
+        return names.filter { $0 == preferredName } + names.filter { $0 != preferredName }
+    }
+
+    /// TravelMate's own settings in a `uci get travelmate` result (the section is named `global`).
+    static func travelmateGlobal(in travelmate: JSONValue) -> (name: String, section: JSONValue)? {
+        TravelmateConfig.orderedSections(travelmate).first {
+            $0.section[".type"].stringValue == travelmateSectionType
+        }
+    }
+
+    /// A saved TravelMate network that carries the Wi-Fi tunnel: the iPhone's hotspot.
+    struct WifiUplink: Equatable, Sendable {
+        /// The travelmate section (anonymous, `cfg0254f8`).
+        let section: String
+        let ssid: String
+        /// The radio it is joined with.
+        let device: String
+        let bssid: String
+    }
+
+    /// The saved networks whose tunnel is `phone_wifi`, in file order.
+    static func wifiUplinks(in travelmate: JSONValue) -> [WifiUplink] {
+        TravelmateConfig.orderedSections(travelmate).compactMap { entry -> WifiUplink? in
+            guard entry.section[".type"].stringValue == "uplink",
+                entry.section["vpniface"].coercedString == wifiInterface
+            else { return nil }
+            return WifiUplink(
+                section: entry.name,
+                ssid: entry.section["ssid"].coercedString ?? "",
+                device: entry.section["device"].coercedString ?? "",
+                bssid: entry.section["bssid"].coercedString ?? "")
+        }
     }
 
     /// The packages of `required` that aren't among the `installed` names, in `required` order.
@@ -180,10 +312,18 @@ enum PhoneDataRouterConfig {
     }
 
     /// The router's Phone Data state from what was read off it. `missingPackages` is what the
-    /// router's installed list lacks of `RouterService.phoneDataPackages`.
+    /// router's installed list lacks of `RouterService.phoneDataPackages`, `missingWifiPackages`
+    /// of `RouterService.phoneDataWifiPackages`.
+    ///
+    /// The Wi-Fi half reads TravelMate's saved networks (`travelmate`, nil when the router has no
+    /// such config: the package isn't installed), the Wi-Fi stations behind them (`wireless`) and
+    /// TravelMate's status file (`travelmateStatusFile`, empty when there is none). What isn't
+    /// given reads as "nothing of Wi-Fi is there".
     static func state(
         network: JSONValue, firewall: JSONValue, interfaceDump: JSONValue,
-        missingPackages: [String], usbDevice: String?
+        travelmate: JSONValue? = nil, wireless: JSONValue = .null,
+        travelmateStatusFile: String = "",
+        missingPackages: [String], missingWifiPackages: [String] = [], usbDevice: String?
     ) -> PhoneDataRouterState {
         let usb = network[usbInterface]
         let tunnel = network[tunnelInterface]
@@ -203,6 +343,32 @@ enum PhoneDataRouterConfig {
         let usbLinkUp = usbEntry.map { $0["up"].boolValue == true && hasIPv4($0) } ?? false
         let tunnelUp = dumpEntry(tunnelInterface, in: interfaceDump)?["up"].boolValue == true
 
+        // Wi-Fi: the iPhone's hotspot is a TravelMate network that carries a tunnel of its own.
+        let wifiTunnel = network[wifiInterface]
+        let wifiPeer = wifiPeerSections(in: network).first.map { network[$0] } ?? JSONValue.null
+        let wifiInWanZone = wanZone(in: firewall).map { $0.networks.contains(wifiInterface) } ?? false
+        let uplinks = travelmate.map { wifiUplinks(in: $0) } ?? []
+        // A saved network without its wifi-iface can't connect: half of one was saved.
+        let joinable = uplinks.filter {
+            !TravelmateConfig.staSections(
+                in: wireless, ssid: $0.ssid, device: $0.device, bssid: $0.bssid
+            ).isEmpty
+        }
+        let wifiConfigured =
+            wifiTunnel[".type"].stringValue == "interface"
+            && !wifiPeer.isNull
+            && wifiInWanZone
+            && !joinable.isEmpty
+
+        let status = TravelmateStatus.fromRuntime(travelmateStatusFile, enabled: true)
+        let wifiUplinkActive =
+            status.isConnected
+            && uplinks.contains {
+                !$0.ssid.isEmpty && $0.ssid == status.activeSsid
+                    && ($0.device.isEmpty || status.activeDevice.isEmpty
+                        || $0.device == status.activeDevice)
+            }
+
         return PhoneDataRouterState(
             missingPackages: missingPackages,
             configured: configured,
@@ -210,7 +376,14 @@ enum PhoneDataRouterConfig {
             configuredDevice: nonEmpty(usb["device"].coercedString),
             usbDevice: usbDevice,
             usbLinkUp: usbLinkUp,
-            tunnelUp: tunnelUp)
+            tunnelUp: tunnelUp,
+            travelmateInstalled: travelmate != nil,
+            wifiConfigured: wifiConfigured,
+            wifiSSID: nonEmpty((joinable.first ?? uplinks.first)?.ssid),
+            wifiPhonePublicKey: nonEmpty(wifiPeer["public_key"].coercedString),
+            wifiTunnelUp: dumpEntry(wifiInterface, in: interfaceDump)?["up"].boolValue == true,
+            wifiUplinkActive: wifiUplinkActive,
+            missingWifiPackages: missingWifiPackages)
     }
 
     /// One entry of `network.interface dump`'s `interface[]`.
@@ -257,6 +430,37 @@ enum PhoneDataRouterConfig {
             .filter { !$0.isEmpty }
     }
 
+    // MARK: Finding the iPhone's hotspot
+
+    /// The scanned networks as hotspot choices: hidden ones left out, one entry per name on
+    /// each radio (its strongest), the likely iPhones first and then the strongest signal first.
+    static func hotspots(from scans: [WifiScanResult]) -> [PhoneDataHotspot] {
+        // A signal of 0 is how a scan says "unknown": weaker than any real one.
+        func strength(_ scan: WifiScanResult) -> Int { scan.signal == 0 ? Int.min : scan.signal }
+
+        var strongest: [String: WifiScanResult] = [:]
+        for scan in scans where !scan.ssid.isEmpty {
+            let key = "\(scan.device)|\(scan.ssid)"
+            if let seen = strongest[key], strength(seen) >= strength(scan) { continue }
+            strongest[key] = scan
+        }
+        return strongest.values
+            .map { scan in
+                PhoneDataHotspot(
+                    ssid: scan.ssid, device: scan.device, encryption: scan.encryption,
+                    signal: scan.signal == 0 ? nil : scan.signal,
+                    band: scan.bandLabel.isEmpty ? nil : scan.bandLabel)
+            }
+            .sorted { lhs, rhs in
+                if lhs.looksLikeIPhone != rhs.looksLikeIPhone { return lhs.looksLikeIPhone }
+                let lhsSignal = lhs.signal ?? Int.min
+                let rhsSignal = rhs.signal ?? Int.min
+                if lhsSignal != rhsSignal { return lhsSignal > rhsSignal }
+                if lhs.ssid != rhs.ssid { return lhs.ssid < rhs.ssid }
+                return lhs.device < rhs.device
+            }
+    }
+
     // MARK: Values to write
 
     static func usbInterfaceValues(device: String) -> [String: JSONValue] {
@@ -283,6 +487,22 @@ enum PhoneDataRouterConfig {
         ]
     }
 
+    /// The Wi-Fi tunnel. `address` is the router's tunnel address for it, without a mask.
+    /// It is not tied to a link and not started at boot (`auto 0`): TravelMate brings it up
+    /// once the router has joined the iPhone's hotspot, and down on any other network.
+    static func wifiInterfaceValues(privateKey: String, address: String) -> [String: JSONValue] {
+        [
+            "proto": .string("wireguard"),
+            "auto": .string("0"),
+            "private_key": .string(privateKey),
+            "addresses": stringList(["\(address)/32"]),
+            "mtu": .string(String(mtu)),
+            "dns": stringList([dnsServer]),
+            "metric": .string(String(wifiMetric)),
+        ]
+    }
+
+    /// The phone, for either tunnel.
     static func peerValues(phonePublicKey: String) -> [String: JSONValue] {
         [
             "description": .string(peerDescription),
@@ -339,12 +559,170 @@ enum PhoneDataRouterConfig {
     /// out of the `wan` zone. Everything the router doesn't have is left out, so a router
     /// without Phone Data gets an empty plan.
     static func removalPlan(network: JSONValue, firewall: JSONValue) -> PhoneDataConfigPlan {
-        var doomed = peerSections(in: network)
-        // The name is ours even when something else of another type sits under it.
-        if network[peerSection].objectValue != nil, !doomed.contains(peerSection) {
-            doomed.append(peerSection)
+        removalEdits(
+            peers: peerSections(in: network), peerName: peerSection,
+            interfaces: [tunnelInterface, usbInterface], network: network, firewall: firewall)
+    }
+
+    /// The edits behind Wi-Fi sharing, apart from the iPhone's own saved network (the
+    /// `wifi-iface` and the TravelMate uplink, which `RouterService` saves the way TravelMate's
+    /// tab does, with `wifiUplinkValues` on the uplink):
+    /// - `phone_wifi` and its phone peer, in the `network` config. Sections that are there are
+    ///   updated, so running it again, also with new keys, is safe.
+    /// - `phone_wifi` in the `wan` zone, existing members kept.
+    /// - TravelMate's own settings: VPN handling on, and proactive mode on so TravelMate moves
+    ///   to the iPhone while on hotel Wi-Fi. Its `trm_vpnifacelist` filter says which tunnels
+    ///   TravelMate may touch; without one it takes down every WireGuard tunnel it knows, USB's
+    ///   included. An empty list with VPN handling already on means "all", so it is seeded with
+    ///   the router's own WireGuard interfaces to keep them handled; an empty list with VPN
+    ///   handling off touches nothing yet and gets only the Wi-Fi tunnel. An existing list is
+    ///   kept and added to, and the USB tunnel is taken out of it if somebody put it there.
+    /// - Throws: `PhoneDataRouterError.noWanZone` when the firewall has no `wan` zone.
+    static func wifiSetupPlan(
+        network: JSONValue, firewall: JSONValue, travelmate: JSONValue,
+        privateKey: String, address: String, phonePublicKey: String
+    ) throws -> PhoneDataConfigPlan {
+        guard let zone = wanZone(in: firewall) else { throw PhoneDataRouterError.noWanZone }
+
+        var plan = PhoneDataConfigPlan()
+        plan.network += upsert(
+            wifiInterface, type: "interface",
+            values: wifiInterfaceValues(privateKey: privateKey, address: address), in: network)
+        plan.network += upsert(
+            wifiPeerSection, type: wifiPeerSectionType,
+            values: peerValues(phonePublicKey: phonePublicKey), in: network)
+        // The tunnel has one peer. Any other one of its type would fight over the same routes.
+        for stray in wifiPeerSections(in: network) where stray != wifiPeerSection {
+            plan.network.append(.delete(section: stray))
         }
-        for name in [tunnelInterface, usbInterface] where network[name].objectValue != nil {
+
+        let members = addingMembers([wifiInterface], to: zone.networks)
+        if members != zone.networks {
+            plan.firewall.append(
+                .set(section: zone.section, values: ["network": stringList(members)]))
+        }
+
+        plan.travelmate = wifiTravelmateEdits(travelmate: travelmate, network: network)
+        return plan
+    }
+
+    /// TravelMate's side of `wifiSetupPlan`.
+    private static func wifiTravelmateEdits(
+        travelmate: JSONValue, network: JSONValue
+    ) -> [PhoneDataUciEdit] {
+        let existing = travelmateGlobal(in: travelmate)
+        let global = existing?.section ?? JSONValue.null
+
+        var tunnels = listValues(global["trm_vpnifacelist"])
+        if tunnels.isEmpty, global["trm_vpn"].coercedString == "1" {
+            tunnels = otherWireGuardInterfaces(in: network)
+        }
+        // TravelMate takes down the tunnels it handles when it isn't on their uplink. The USB
+        // tunnel has its own link and must never be one of them.
+        tunnels.removeAll { $0 == tunnelInterface }
+        if !tunnels.contains(wifiInterface) { tunnels.append(wifiInterface) }
+
+        let values: [String: JSONValue] = [
+            "trm_vpn": .string("1"),
+            "trm_proactive": .string("1"),
+            "trm_vpnifacelist": stringList(tunnels),
+        ]
+        guard let existing else {
+            return [.add(type: travelmateSectionType, name: travelmateGlobalSection, values: values)]
+        }
+        return [.set(section: existing.name, values: values)]
+    }
+
+    /// WireGuard interfaces of the router that are neither of Phone Data's, in file order.
+    private static func otherWireGuardInterfaces(in network: JSONValue) -> [String] {
+        TravelmateConfig.orderedSections(network).compactMap { entry -> String? in
+            guard entry.section[".type"].stringValue == "interface",
+                entry.section["proto"].coercedString == "wireguard",
+                entry.name != tunnelInterface, entry.name != wifiInterface
+            else { return nil }
+            return entry.name
+        }
+    }
+
+    /// The edits that take Wi-Fi sharing off the router, apart from the iPhone's saved network
+    /// (`wifiUplinks`, which `RouterService` removes the way TravelMate's tab does):
+    /// `phone_wifi` and its peer, `phone_wifi` out of the `wan` zone, and out of TravelMate's
+    /// `trm_vpnifacelist`. When that list is left empty the option goes (`uci set` refuses an
+    /// empty list) and VPN handling is switched off again, unless a saved network other than the
+    /// iPhone's still wants a tunnel. Everything the router doesn't have is left out, so a router
+    /// without Wi-Fi sharing gets an empty plan.
+    static func wifiRemovalPlan(
+        network: JSONValue, firewall: JSONValue, travelmate: JSONValue
+    ) -> PhoneDataConfigPlan {
+        var plan = removalEdits(
+            peers: wifiPeerSections(in: network), peerName: wifiPeerSection,
+            interfaces: [wifiInterface], network: network, firewall: firewall)
+        plan.travelmate = wifiTravelmateRemovalEdits(travelmate: travelmate)
+        return plan
+    }
+
+    private static func wifiTravelmateRemovalEdits(travelmate: JSONValue) -> [PhoneDataUciEdit] {
+        guard let global = travelmateGlobal(in: travelmate) else { return [] }
+        let tunnels = listValues(global.section["trm_vpnifacelist"])
+        guard tunnels.contains(wifiInterface) else { return [] }
+
+        let remaining = tunnels.filter { $0 != wifiInterface }
+        if !remaining.isEmpty {
+            return [.set(section: global.name, values: ["trm_vpnifacelist": stringList(remaining)])]
+        }
+
+        var edits: [PhoneDataUciEdit] = [
+            .deleteOption(section: global.name, option: "trm_vpnifacelist")
+        ]
+        let otherUplinkWantsTunnel = TravelmateConfig.orderedSections(travelmate).contains {
+            $0.section[".type"].stringValue == "uplink"
+                && $0.section["vpniface"].coercedString != wifiInterface
+                && $0.section["vpn"].coercedString == "1"
+        }
+        if !otherUplinkWantsTunnel, global.section["trm_vpn"].coercedString == "1" {
+            edits.append(.set(section: global.name, values: ["trm_vpn": .string("0")]))
+        }
+        return edits
+    }
+
+    /// The order `uci order` has to give the `wireless` config so TravelMate prefers the
+    /// iPhone: it tries saved networks in the order of their `mode sta` wifi-ifaces, so the
+    /// iPhone's goes before every other one. The answer lists every section of the config
+    /// (`uci order` moves each section it is given to its place in the list), with the iPhone's
+    /// moved to where the first other station was and nothing else moved. Nil when nothing needs
+    /// to move: it is first already, no other station exists, or the section isn't there. Also
+    /// nil when the router doesn't say where every section stands, since an order guessed from
+    /// section names would scramble the file.
+    static func wirelessOrder(wireless: JSONValue, phoneSection: String) -> [String]? {
+        let entries = TravelmateConfig.orderedSections(wireless)
+        guard entries.allSatisfy({ $0.section[".index"].intValue != nil }) else { return nil }
+        let names = entries.map { $0.name }
+        guard let phoneAt = names.firstIndex(of: phoneSection) else { return nil }
+        let firstOtherStation = entries.firstIndex {
+            $0.name != phoneSection
+                && $0.section[".type"].stringValue == "wifi-iface"
+                && $0.section["mode"].coercedString == "sta"
+        }
+        guard let firstOtherStation, firstOtherStation < phoneAt else { return nil }
+
+        var order = names
+        order.remove(at: phoneAt)
+        order.insert(phoneSection, at: firstOtherStation)
+        return order
+    }
+
+    /// Deletes the peer sections and interfaces that are there, and takes the interfaces out of
+    /// the `wan` zone.
+    private static func removalEdits(
+        peers: [String], peerName: String, interfaces: [String],
+        network: JSONValue, firewall: JSONValue
+    ) -> PhoneDataConfigPlan {
+        var doomed = peers
+        // The name is ours even when something else of another type sits under it.
+        if network[peerName].objectValue != nil, !doomed.contains(peerName) {
+            doomed.append(peerName)
+        }
+        for name in interfaces where network[name].objectValue != nil {
             doomed.append(name)
         }
 
@@ -352,7 +730,7 @@ enum PhoneDataRouterConfig {
         plan.network = doomed.map { PhoneDataUciEdit.delete(section: $0) }
 
         if let zone = wanZone(in: firewall) {
-            let remaining = removingMembers([usbInterface, tunnelInterface], from: zone.networks)
+            let remaining = removingMembers(interfaces, from: zone.networks)
             if remaining != zone.networks {
                 // `uci set` refuses an empty list: an emptied option is deleted instead.
                 plan.firewall.append(
