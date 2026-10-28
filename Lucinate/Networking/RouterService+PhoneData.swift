@@ -1,41 +1,57 @@
 import Foundation
 
 /// Router side of Phone Data: the packages it needs, finding the iPhone on the router's USB
-/// port, and setting up or removing the interfaces. What goes into uci is decided by
-/// `PhoneDataRouterConfig`; this runs the reads and the writes.
+/// port and its hotspot on the router's Wi-Fi, and setting up or removing the interfaces, over
+/// the cable and over Wi-Fi. What goes into uci is decided by `PhoneDataRouterConfig`; this runs
+/// the reads and the writes.
 extension RouterService {
-    /// What the router must have installed: the iPhone's USB network driver, the program that
-    /// pairs with the iPhone, and WireGuard.
+    /// What the router must have installed for the cable: the iPhone's USB network driver, the
+    /// program that pairs with the iPhone, and WireGuard.
     static let phoneDataPackages = [
         "kmod-usb-net-ipheth", "usbmuxd", "kmod-wireguard", "wireguard-tools",
     ]
+
+    /// What the router must have installed for Wi-Fi: WireGuard. TravelMate, which joins the
+    /// hotspot, is the router's own business (`PhoneDataRouterState.travelmateInstalled`).
+    static let phoneDataWifiPackages = ["kmod-wireguard", "wireguard-tools"]
 
     // MARK: - State
 
     /// Everything the Phone Data screen shows, read together. One failed read fails the whole
     /// call: a half-read state would show a router as not set up when it merely didn't answer.
+    /// The exception is TravelMate's status file, which only says whether the router is on the
+    /// iPhone's hotspot right now: unreadable counts as "not connected", like everywhere else.
     ///
     /// The installed-package list is by far the heaviest read (apk runs on the router, which
     /// may be a small one that is also carrying the household's internet). A caller that
-    /// polls passes what a recent check found as `knownMissingPackages` to skip it; nil
-    /// reads the list now.
-    func phoneDataState(knownMissingPackages: [String]? = nil) async throws
+    /// polls passes what a recent check found as `known` to skip it; nil reads the list now.
+    func phoneDataState(known: PhoneDataMissingPackages? = nil) async throws
         -> PhoneDataRouterState
     {
         async let network = uciGet(config: "network")
         async let firewall = uciGet(config: "firewall")
         async let dump = interfaceDump()
-        async let missing = missingPhoneDataPackages(known: knownMissingPackages)
+        async let missing = missingPhoneDataPackages(known: known)
         async let usbDevice = findIPhoneUSBDevice()
+        async let travelmate = uciGetIfPresent(config: "travelmate")
+        async let wireless = uciGetIfPresent(config: "wireless")
+        async let statusFile = travelmateStatusFile()
 
         let (networkConfig, firewallConfig, interfaces, missingPackages, device) =
             try await (network, firewall, dump, missing, usbDevice)
+        let (travelmateConfig, wirelessConfig, status) =
+            try await (travelmate, wireless, statusFile)
         return PhoneDataRouterConfig.state(
             network: networkConfig, firewall: firewallConfig, interfaceDump: interfaces,
-            missingPackages: missingPackages, usbDevice: device)
+            travelmate: travelmateConfig, wireless: wirelessConfig ?? .null,
+            travelmateStatusFile: status,
+            missingPackages: missingPackages.usb, missingWifiPackages: missingPackages.wifi,
+            usbDevice: device)
     }
 
-    private func missingPhoneDataPackages(known: [String]?) async throws -> [String] {
+    private func missingPhoneDataPackages(known: PhoneDataMissingPackages?) async throws
+        -> PhoneDataMissingPackages
+    {
         if let known { return known }
         let installed: [PackageCatalog.Entry]
         do {
@@ -43,8 +59,28 @@ extension RouterService {
         } catch let error as UbusError where error.isAccessDenied {
             throw PhoneDataRouterError.packagesNotPermitted
         }
-        return PhoneDataRouterConfig.missingPackages(
-            required: Self.phoneDataPackages, installed: installed.map { $0.name })
+        let names = installed.map { $0.name }
+        return PhoneDataMissingPackages(
+            usb: PhoneDataRouterConfig.missingPackages(
+                required: Self.phoneDataPackages, installed: names),
+            wifi: PhoneDataRouterConfig.missingPackages(
+                required: Self.phoneDataWifiPackages, installed: names))
+    }
+
+    /// `uci get`, or nil when the router has no such config: the package that owns it isn't
+    /// installed. Any other failure is thrown.
+    private func uciGetIfPresent(config: String) async throws -> JSONValue? {
+        do {
+            return try await uciGet(config: config)
+        } catch let error as UbusError where error.isNotFound {
+            return nil
+        }
+    }
+
+    /// TravelMate's status file. Empty when there is none yet (TravelMate never ran, or was
+    /// stopped) or when it can't be read.
+    private func travelmateStatusFile() async -> String {
+        (try? await fileRead(path: TravelmateStatus.runtimeFilePath)) ?? ""
     }
 
     // MARK: - Packages
@@ -154,7 +190,32 @@ extension RouterService {
         }
     }
 
-    // MARK: - Setup and removal
+    // MARK: - The iPhone's hotspot
+
+    /// The router's Wi-Fi radios and their bands, from its wireless config. `radio0` (2.4 GHz)
+    /// and `radio1` (5 GHz), the two usual ones, when the config can't be read.
+    func phoneDataRadios() async -> [PhoneDataRadio] {
+        guard let wireless = try? await uciGet(config: "wireless") else {
+            return [PhoneDataRadio(device: "radio0", band: 2), PhoneDataRadio(device: "radio1", band: 5)]
+        }
+        return PhoneDataRouterConfig.radios(fromWireless: wireless)
+    }
+
+    /// The router's Wi-Fi radios (`radio0`, `radio1`, ...), by name.
+    func phoneDataScanRadios() async -> [String] {
+        await phoneDataRadios().map(\.device)
+    }
+
+    /// The networks one radio sees now. A radio that is busy, or refuses to scan, sees none: one
+    /// radio failing doesn't fail the scan.
+    func phoneDataScan(radio: String) async -> [WifiScanResult] {
+        guard let result = try? await wifiScan(radio: radio) else { return [] }
+        return (result["results"].arrayValue ?? []).map {
+            WifiScanResult.fromIwinfo($0, device: radio)
+        }
+    }
+
+    // MARK: - Setup and removal over USB
 
     /// Sets the router up for Phone Data, or brings an existing setup up to date (new keys, a
     /// new USB device name). Safe to run again.
@@ -183,7 +244,8 @@ extension RouterService {
     /// otherwise keep showing values that were never applied, and the next unrelated commit
     /// would ship them. A firewall commit that fails after the network one went through
     /// leaves the router without the zone membership, which `phoneDataState` reports as
-    /// "not configured"; running setup again finishes the job.
+    /// "not configured"; running setup again finishes the job. For the cable's plans, which
+    /// touch no other config.
     private func commit(_ plan: PhoneDataConfigPlan) async throws {
         do {
             try await stage(plan.network, config: "network")
@@ -218,6 +280,119 @@ extension RouterService {
             case .deleteOption(let section, let option):
                 try await uciDeleteOption(config: config, section: section, option: option)
             }
+        }
+    }
+
+    // MARK: - Setup and removal over Wi-Fi
+
+    /// Sets the router up for Phone Data over Wi-Fi, or brings an existing setup up to date (new
+    /// keys, another hotspot). Safe to run again. The iPhone's hotspot is saved as a TravelMate
+    /// network (the way TravelMate's tab saves one) whose tunnel is `phone_wifi`, and moved ahead
+    /// of the other saved networks so TravelMate prefers it; the tunnel, its place in the `wan`
+    /// zone and TravelMate's VPN settings come with it (see `PhoneDataRouterConfig.wifiSetupPlan`).
+    ///
+    /// Everything is staged first and committed together, then TravelMate is restarted once: the
+    /// router's Wi-Fi may restart with the commit, so nothing is left for after it but that
+    /// restart, which TravelMate's own config trigger would do anyway. A failure before the
+    /// commits are in drops what was staged.
+    /// - Throws: `PhoneDataRouterError.travelmateMissing` when the router has no TravelMate.
+    func applyPhoneDataWifi(
+        keys: PhoneDataRouterKeys, hotspot: PhoneDataHotspot, password: String
+    ) async throws {
+        async let network = uciGet(config: "network")
+        async let firewall = uciGet(config: "firewall")
+        async let travelmate = uciGetIfPresent(config: "travelmate")
+        let (networkConfig, firewallConfig, travelmateConfig) =
+            try await (network, firewall, travelmate)
+        guard let travelmateConfig else { throw PhoneDataRouterError.travelmateMissing }
+        let plan = try PhoneDataRouterConfig.wifiSetupPlan(
+            network: networkConfig, firewall: firewallConfig, travelmate: travelmateConfig,
+            privateKey: keys.routerPrivateKey, address: keys.routerAddress,
+            phonePublicKey: keys.phonePublicKey)
+
+        try await stageAndCommit {
+            let station = try await stageTravelmateUplink(
+                ssid: hotspot.ssid, password: password, device: hotspot.device,
+                encryption: hotspot.encryption,
+                uplinkValues: PhoneDataRouterConfig.wifiUplinkValues)
+            try await stage(plan.network, config: "network")
+            try await stage(plan.firewall, config: "firewall")
+            try await stage(plan.travelmate, config: "travelmate")
+            // Read after the station is staged, so it is in the list being ordered.
+            let wireless = try await uciGet(config: "wireless")
+            if let order = PhoneDataRouterConfig.wirelessOrder(
+                wireless: wireless, phoneSection: station)
+            {
+                try await uciOrder(config: "wireless", sections: order)
+            }
+            // The router's Wi-Fi may restart with the `wireless` commit, so it comes right before
+            // the last one, like when TravelMate's tab saves a network.
+            return plan.firewall.isEmpty
+                ? ["network", "wireless", "travelmate"]
+                : ["network", "firewall", "wireless", "travelmate"]
+        }
+        _ = try? await travelmateRestart()
+    }
+
+    /// Takes Wi-Fi sharing off the router: the iPhone's saved network (its wifi-iface and its
+    /// TravelMate uplink: left in place the router would keep joining the hotspot, and without
+    /// the tunnel that is plain hotspot data), `phone_wifi` and its peer, and `phone_wifi` in the
+    /// `wan` zone and in TravelMate's VPN settings. The packages and the cable's setup stay.
+    /// Like setup it is staged, committed together, and followed by one TravelMate restart.
+    func removePhoneDataWifi() async throws {
+        async let network = uciGet(config: "network")
+        async let firewall = uciGet(config: "firewall")
+        async let travelmate = uciGetIfPresent(config: "travelmate")
+        async let wireless = uciGetIfPresent(config: "wireless")
+        let (networkConfig, firewallConfig, travelmateConfig, wirelessConfig) =
+            try await (network, firewall, travelmate, wireless)
+
+        let travelmateValues = travelmateConfig ?? .null
+        let plan = PhoneDataRouterConfig.wifiRemovalPlan(
+            network: networkConfig, firewall: firewallConfig, travelmate: travelmateValues)
+        let uplinks = PhoneDataRouterConfig.wifiUplinks(in: travelmateValues)
+        guard !plan.isEmpty || !uplinks.isEmpty else { return }
+
+        try await stageAndCommit {
+            var removedStations: Set<String> = []
+            for uplink in uplinks {
+                let station = try await stageTravelmateUplinkRemoval(
+                    ssid: uplink.ssid, device: uplink.device, uplinkSection: uplink.section,
+                    travelmate: travelmateValues, wireless: wirelessConfig ?? .null,
+                    taken: removedStations)
+                if let station { removedStations.insert(station) }
+            }
+            try await stage(plan.network, config: "network")
+            try await stage(plan.firewall, config: "firewall")
+            try await stage(plan.travelmate, config: "travelmate")
+
+            var commits: [String] = []
+            if !plan.network.isEmpty { commits.append("network") }
+            if !plan.firewall.isEmpty { commits.append("firewall") }
+            if !removedStations.isEmpty { commits.append("wireless") }
+            if !uplinks.isEmpty || !plan.travelmate.isEmpty { commits.append("travelmate") }
+            return commits
+        }
+        _ = try? await travelmateRestart()
+    }
+
+    /// Runs `stageEdits`, which stages edits and returns the configs it staged them in, in the
+    /// order to commit them, then commits those. A failure anywhere up to the last commit drops
+    /// what is still staged in any config Wi-Fi setup and removal touch: `uci get` would
+    /// otherwise keep showing values that were never applied, and the next unrelated commit
+    /// would ship them. A commit that fails after an earlier one went through leaves that config
+    /// changed; setup and removal are safe to run again.
+    private func stageAndCommit(stageEdits: () async throws -> [String]) async throws {
+        do {
+            let configs = try await stageEdits()
+            for config in configs {
+                try await uciCommit(config: config)
+            }
+        } catch {
+            for config in ["network", "firewall", "wireless", "travelmate"] {
+                try? await uciRevert(config: config)
+            }
+            throw error
         }
     }
 }

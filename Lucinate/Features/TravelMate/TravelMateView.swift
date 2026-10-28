@@ -63,7 +63,7 @@ struct TravelMateView: View {
                     forget(uplink)
                 }
             } message: { uplink in
-                Text("This removes \"\(uplink.ssid)\" from saved networks.")
+                Text(forgetMessage(for: uplink))
             }
             .alert(
                 "Apply broadcast change?",
@@ -91,9 +91,7 @@ struct TravelMateView: View {
         } else if controller.loaded {
             loadedContent
         } else if let error = controller.error {
-            ErrorStateView(message: error) {
-                Task { await loadIfPossible() }
-            }
+            errorView(error)
         } else {
             // First load (or the instant before .task fires): skeletons.
             loadingSkeleton
@@ -115,6 +113,26 @@ struct TravelMateView: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(theme.accent)
+            }
+            .padding(Spacing.md)
+        }
+        // A short screen would not overscroll otherwise, and pull-to-refresh needs the bounce.
+        .scrollBounceBehavior(.always, axes: .vertical)
+        .refreshable {
+            await loadIfPossible()
+        }
+    }
+
+    /// The router can't be reached. Phone Data lives on this iPhone, so its card keeps telling
+    /// the truth, which matters most when the router is on the iPhone's hotspot and this iPhone
+    /// can't reach it at all.
+    private func errorView(_ message: String) -> some View {
+        ScrollView {
+            VStack(spacing: Spacing.md) {
+                PhoneDataCard()
+                ErrorStateView(message: message) {
+                    Task { await loadIfPossible() }
+                }
             }
             .padding(Spacing.md)
         }
@@ -537,6 +555,9 @@ struct TravelMateView: View {
                         badge("Paused", color: theme.warning)
                     }
                 }
+                if uplink.carriesPhoneData {
+                    phoneDataTag
+                }
                 if !uplink.enabled {
                     pausedNotice(uplink)
                 }
@@ -610,6 +631,23 @@ struct TravelMateView: View {
             .padding(.horizontal, Spacing.sm)
             .padding(.vertical, 3)
             .background(color.opacity(0.15), in: .capsule)
+    }
+
+    /// Marks the saved network Phone Data set up for the iPhone's hotspot.
+    private var phoneDataTag: some View {
+        Label("Phone Data", systemImage: "iphone.radiowaves.left.and.right")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(theme.accent)
+            .padding(.horizontal, Spacing.sm)
+            .padding(.vertical, 3)
+            .background(theme.accent.opacity(0.15), in: .capsule)
+    }
+
+    /// Forgetting the iPhone's hotspot cuts Phone Data over Wi-Fi off, so the alert says so.
+    private func forgetMessage(for uplink: TravelmateUplink) -> String {
+        let removal = "This removes \"\(uplink.ssid)\" from saved networks."
+        guard uplink.carriesPhoneData else { return removal }
+        return removal + " Phone Data over Wi-Fi stops working until you set it up again."
     }
 
     // MARK: - Floating add button

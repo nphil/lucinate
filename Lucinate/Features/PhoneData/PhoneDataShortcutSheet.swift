@@ -9,7 +9,6 @@ struct PhoneDataShortcutSheet: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
-    @ScaledMetric(relativeTo: .subheadline) private var markerSize: CGFloat = 26
 
     /// Opens the Shortcuts app on a new, empty shortcut.
     private static let newShortcutURL = URL(string: "shortcuts://create-shortcut")
@@ -18,11 +17,6 @@ struct PhoneDataShortcutSheet: View {
         let id: Int
         /// Markdown: the names of things to tap are bold.
         let text: String
-
-        /// The same sentence without the markdown, for VoiceOver.
-        var spokenText: String {
-            text.replacingOccurrences(of: "**", with: "")
-        }
     }
 
     private let steps = [
@@ -41,7 +35,8 @@ struct PhoneDataShortcutSheet: View {
                 VStack(alignment: .leading, spacing: Spacing.md) {
                     Text(
                         "One shortcut turns on Personal Hotspot and starts Phone Data, "
-                            + "so you never have to dig through Settings."
+                            + "so you never have to dig through Settings. It works plugged in "
+                            + "or over Wi-Fi."
                     )
                     .font(.subheadline)
                     .foregroundStyle(theme.textSecondary)
@@ -72,22 +67,10 @@ struct PhoneDataShortcutSheet: View {
         Card {
             VStack(alignment: .leading, spacing: Spacing.md) {
                 ForEach(steps) { step in
-                    stepRow(step)
+                    PhoneDataInstructionRow(number: step.id, text: step.text)
                 }
             }
         }
-    }
-
-    private func stepRow(_ step: Step) -> some View {
-        HStack(alignment: .top, spacing: Spacing.sm) {
-            PhoneDataStepMarker(number: step.id, mark: .current, size: markerSize)
-            Text(LocalizedStringKey(step.text))
-                .font(.subheadline)
-                .foregroundStyle(theme.textPrimary)
-                .frame(maxWidth: .infinity, minHeight: markerSize, alignment: .leading)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Step \(step.id). \(step.spokenText)")
     }
 
     private var openShortcutsButton: some View {

@@ -40,13 +40,25 @@ final class PhoneDataController {
     /// Bytes carried since launch, across restarts of the engine. Updated by the sampler while the
     /// app is on screen, and when a Shortcut asks.
     private(set) var traffic = PhoneDataTraffic()
-    /// The routers with a recent handshake. Updated like `traffic`.
-    private(set) var connectedRouterIDs: Set<String> = []
-    /// The routers this iPhone lets in.
+    /// The routers with a recent handshake, and over which links. Updated like `traffic`.
+    private(set) var connectedLinksByRouter: [String: Set<PhoneDataLink>] = [:]
+    /// The routers this iPhone lets in, one entry per link.
     private(set) var peers: [PhoneDataPeer] = []
 
-    func isRouterConnected(_ routerID: String) -> Bool { connectedRouterIDs.contains(routerID) }
+    /// The routers with a recent handshake over any link.
+    var connectedRouterIDs: Set<String> { Set(connectedLinksByRouter.keys) }
+
+    /// True when the router has a recent handshake over any link.
+    func isRouterConnected(_ routerID: String) -> Bool { connectedLinksByRouter[routerID] != nil }
+    /// The links of the router with a recent handshake.
+    func connectedLinks(for routerID: String) -> Set<PhoneDataLink> {
+        connectedLinksByRouter[routerID] ?? []
+    }
+    /// True when the router is set up over any link.
     func hasPeer(for routerID: String) -> Bool { peers.contains { $0.routerID == routerID } }
+    func hasPeer(for routerID: String, link: PhoneDataLink) -> Bool {
+        peers.contains { $0.routerID == routerID && $0.link == link }
+    }
 
     /// The iPhone's public key, base64, to compare with the one a router was set up with. Empty
     /// until the first router is set up, and while the keys can't be read (see `status`).
@@ -56,19 +68,20 @@ final class PhoneDataController {
 
     // MARK: - Setting routers up
 
-    /// A new key pair for the router, and its address in the tunnel: the lowest free one, or the one
-    /// it already has. Saved, and handed to the engine if it is running, before this returns. Setting
-    /// a router up again replaces its key, so what the router had stops working. Throws when the
-    /// keys can't be read or saved.
-    func prepareRouter(routerID: String) throws -> PhoneDataRouterKeys {
+    /// A new key pair for one link of the router, and its address in the tunnel: the lowest free one,
+    /// or the one that link already has. Saved, and handed to the engine if it is running, before this
+    /// returns. Setting a link up again replaces its key, so what the router had stops working; the
+    /// router's other link isn't touched. Throws when the keys can't be read or saved.
+    func prepareRouter(routerID: String, link: PhoneDataLink) throws -> PhoneDataRouterKeys {
         loadKeysIfNeeded()
-        let keys = try keyStore.prepareRouter(routerID: routerID)
-        log("A router was set up, \(keyStore.peers.count) in all")
+        let keys = try keyStore.prepareRouter(routerID: routerID, link: link)
+        log("A router was set up over \(link.rawValue), \(keyStore.peers.count) links in all")
         peersChanged()
         return keys
     }
 
-    /// The router is no longer let in. With the last one the engine and the keep-alive sound stop.
+    /// The router is no longer let in, over any link. With the last one the engine and the
+    /// keep-alive sound stop.
     func forgetRouter(routerID: String) {
         do {
             try keyStore.forgetRouter(routerID: routerID)
@@ -76,7 +89,20 @@ final class PhoneDataController {
             log("A router couldn't be removed: \(error.localizedDescription)")
             return
         }
-        log("A router was removed, \(keyStore.peers.count) left")
+        log("A router was removed, \(keyStore.peers.count) links left")
+        peersChanged()
+    }
+
+    /// The router is no longer let in over this link; its other link stays. With the last link the
+    /// engine and the keep-alive sound stop.
+    func forgetLink(routerID: String, link: PhoneDataLink) {
+        do {
+            try keyStore.forgetLink(routerID: routerID, link: link)
+        } catch {
+            log("A router link couldn't be removed: \(error.localizedDescription)")
+            return
+        }
+        log("A router's \(link.rawValue) link was removed, \(keyStore.peers.count) links left")
         peersChanged()
     }
 
@@ -223,7 +249,7 @@ final class PhoneDataController {
         if let problem = keyStore.problem {
             log("The keys can't be used yet: \(problem.message)")
         } else {
-            log("The keys can be read now, \(keyStore.peers.count) routers")
+            log("The keys can be read now, \(keyStore.peers.count) router links")
         }
     }
 
@@ -241,7 +267,7 @@ final class PhoneDataController {
         setServerProblem(nil)
         resetLive()
         startSampler() // only does something while the app is on screen
-        log("Listening on \(host):\(PhoneDataServer.port) for \(keys.peers.count) routers")
+        log("Listening on \(host):\(PhoneDataServer.port) for \(keys.peers.count) router links")
     }
 
     private func pushPeers() {
@@ -304,7 +330,7 @@ final class PhoneDataController {
         } else if !server.running {
             new = .waitingForHotspot
         } else {
-            new = connectedRouterIDs.isEmpty ? .waitingForRouter : .sharing
+            new = connectedLinksByRouter.isEmpty ? .waitingForRouter : .sharing
         }
         guard new != status else { return }
         status = new
@@ -360,8 +386,8 @@ final class PhoneDataController {
 
     private func publishConnections() {
         let addresses = server.running ? server.connectedAddresses : []
-        let connected = Set(peers.filter { addresses.contains($0.address) }.map(\.routerID))
-        if connected != connectedRouterIDs { connectedRouterIDs = connected }
+        let connected = PhoneDataKeys.connectedLinks(of: peers, addresses: addresses)
+        if connected != connectedLinksByRouter { connectedLinksByRouter = connected }
     }
 
     /// A session starts with zero speeds and nobody connected. The byte totals carry on.

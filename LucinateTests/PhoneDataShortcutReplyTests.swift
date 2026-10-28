@@ -17,7 +17,7 @@ final class PhoneDataShortcutReplyTests: XCTestCase {
             Reply.status(.waitingForRouter), "Phone Data is ready. Waiting for your router to connect.")
         XCTAssertEqual(
             Reply.status(.waitingForHotspot),
-            "Phone Data is off. Plug your iPhone into the router with Personal Hotspot on.")
+            "Phone Data is off. Turn on Personal Hotspot, and plug in the USB cable if your router uses it.")
         XCTAssertEqual(Reply.status(.notSetUp), "Set up Phone Data in Lucinate's TravelMate tab first.")
     }
 
@@ -35,7 +35,7 @@ final class PhoneDataShortcutReplyTests: XCTestCase {
     func testStartTellsWhatToDoNext() {
         XCTAssertEqual(
             Reply.start(.waitingForHotspot, keptAlive: true),
-            "Ready. Plug your iPhone into the router with Personal Hotspot on. Lucinate waits 10 minutes.")
+            "Ready. Turn on Personal Hotspot, and plug in the USB cable if your router uses it. Lucinate waits 10 minutes.")
         XCTAssertEqual(
             Reply.start(.waitingForRouter, keptAlive: true), "Ready. Waiting for your router to connect.")
     }

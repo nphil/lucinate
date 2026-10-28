@@ -9,7 +9,7 @@ import AppIntents
 struct UsePhoneDataIntent: AppIntent {
     static let title: LocalizedStringResource = "Use Phone Data"
     static let description = IntentDescription(
-        "Wakes Lucinate in the background, without opening it, and keeps it running for 10 minutes. Your router then uses this iPhone's data as soon as Personal Hotspot is on and the iPhone is plugged into it. Put it after Set Personal Hotspot. The result is true when Phone Data is ready.",
+        "Wakes Lucinate in the background, without opening it, and keeps it running for 10 minutes. Your router then uses this iPhone's data as soon as Personal Hotspot is on and the router can reach the iPhone, over the USB cable or over Wi-Fi. Put it after Set Personal Hotspot. The result is true when Phone Data is ready.",
         categoryName: "Phone Data",
         searchKeywords: ["hotspot", "data", "router", "travel"])
     /// Never opens the app, which would pull the screen up over whatever the shortcut is doing.

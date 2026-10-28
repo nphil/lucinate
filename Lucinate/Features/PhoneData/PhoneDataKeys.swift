@@ -1,20 +1,50 @@
 import CryptoKit
 import Foundation
 
-// The iPhone's side of Phone Data's WireGuard keys: its own (server) key, and one entry per router
-// it lets in. Foundation and CryptoKit only, so the address and load rules can be unit-tested
-// without the Keychain or the engine. `PhoneDataController` is the only caller; the Keychain sits
-// behind `PhoneDataSecretStore` (`PhoneDataKeychain`, in PhoneDataController.swift).
+// The iPhone's side of Phone Data's WireGuard keys: its own (server) key, and one entry per link of
+// each router it lets in (a router can reach the iPhone over the USB cable and over Wi-Fi, each with
+// a key pair and a tunnel address of its own). Foundation and CryptoKit only, so the address and load
+// rules can be unit-tested without the Keychain or the engine. `PhoneDataController` is the only
+// caller; the Keychain sits behind `PhoneDataSecretStore` (`PhoneDataKeychain`, in
+// PhoneDataController.swift).
 
-/// One router this iPhone lets in.
+/// How a router reaches the iPhone. A router has one tunnel per link, each with a key pair and a
+/// tunnel address of its own, so the cable and the Wi-Fi tunnel can both be up without fighting.
+enum PhoneDataLink: String, Codable, Sendable, CaseIterable {
+    /// Over the USB cable.
+    case usb
+    /// Through the iPhone's Personal Hotspot Wi-Fi.
+    case wifi
+}
+
+/// One link of one router this iPhone lets in.
 struct PhoneDataPeer: Codable, Equatable, Sendable, Identifiable {
     /// `Router.id` of the router.
     let routerID: String
-    /// The router's public key, 32 bytes. Its private key is never kept on the iPhone.
+    let link: PhoneDataLink
+    /// The router's public key for this link, 32 bytes. Its private key is never kept on the iPhone.
     let publicKey: Data
-    /// The router's address inside the tunnel, "10.7.0.N".
+    /// The router's address inside the tunnel for this link, "10.7.0.N".
     let address: String
-    var id: String { routerID }
+    var id: String { "\(routerID)#\(link.rawValue)" }
+
+    init(routerID: String, link: PhoneDataLink, publicKey: Data, address: String) {
+        self.routerID = routerID
+        self.link = link
+        self.publicKey = publicKey
+        self.address = address
+    }
+
+    private enum CodingKeys: String, CodingKey { case routerID, link, publicKey, address }
+
+    /// Keys saved before Wi-Fi existed have no `link`: those routers were set up over USB.
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        routerID = try values.decode(String.self, forKey: .routerID)
+        link = try values.decodeIfPresent(PhoneDataLink.self, forKey: .link) ?? .usb
+        publicKey = try values.decode(Data.self, forKey: .publicKey)
+        address = try values.decode(String.self, forKey: .address)
+    }
 }
 
 /// What the router must be given at setup.
@@ -36,7 +66,7 @@ enum PhoneDataKeyError: Error, Equatable, LocalizedError {
     /// The Keychain refused for another reason than being locked; the code is its OSStatus.
     case keychainFailed(Int32)
     case cannotSave
-    /// All 253 tunnel addresses belong to routers already.
+    /// All 253 tunnel addresses belong to routers already (a router uses one per link).
     case noFreeAddress
 
     var message: String {
@@ -47,7 +77,7 @@ enum PhoneDataKeyError: Error, Equatable, LocalizedError {
         case .keychainFailed(let code):
             "This iPhone's Keychain won't give Lucinate its Phone Data keys (error \(code)). Restart the iPhone, then try again."
         case .cannotSave: "Lucinate couldn't save the Phone Data keys on this iPhone. Try again."
-        case .noFreeAddress: "This iPhone is already set up with 253 routers. Remove one first."
+        case .noFreeAddress: "This iPhone is already sharing with as many routers as it can. Remove one first."
         }
     }
 
@@ -56,12 +86,12 @@ enum PhoneDataKeyError: Error, Equatable, LocalizedError {
 
 /// The iPhone's key and the routers it lets in, as saved.
 struct PhoneDataKeys: Codable, Equatable, Sendable {
-    /// Routers get "10.7.0.N", N from 2 to 254. The iPhone itself needs no address.
+    /// Routers get "10.7.0.N", N from 2 to 254, one address per link. The iPhone itself needs none.
     static let subnet = "10.7.0."
     static let hosts = 2...254
 
     var serverPrivateKey: Data
-    /// In the order they were first set up.
+    /// In the order they were first set up, one entry per link of each router.
     var peers: [PhoneDataPeer]
 
     static func new() -> PhoneDataKeys {
@@ -82,17 +112,22 @@ struct PhoneDataKeys: Codable, Equatable, Sendable {
 
     static func address(host: Int) -> String { subnet + String(host) }
 
-    /// The lowest address no router has, or nil when all 253 are taken.
+    /// The lowest address no link of any router has, or nil when all 253 are taken.
     var freeAddress: String? {
         let used = Set(peers.map(\.address))
         return Self.hosts.lazy.map(Self.address(host:)).first { !used.contains($0) }
     }
 
-    /// A new key pair for `routerID`, which replaces the router's entry if it has one. The router
-    /// keeps its address and its place in the list, so setting it up again changes nothing else.
-    /// A router seen for the first time gets the lowest free address; nil when there is none.
-    mutating func prepareRouter(routerID: String) -> PhoneDataRouterKeys? {
-        let existing = peers.firstIndex { $0.routerID == routerID }
+    func hasPeer(routerID: String, link: PhoneDataLink) -> Bool {
+        peers.contains { $0.routerID == routerID && $0.link == link }
+    }
+
+    /// A new key pair for one link of `routerID`, which replaces that link's entry if it has one. The
+    /// link keeps its address and its place in the list, so setting it up again changes nothing else,
+    /// and the router's other link isn't touched. A link seen for the first time gets the lowest free
+    /// address (no two links share one); nil when there is none.
+    mutating func prepareRouter(routerID: String, link: PhoneDataLink) -> PhoneDataRouterKeys? {
+        let existing = peers.firstIndex { $0.routerID == routerID && $0.link == link }
         let address: String
         if let existing {
             address = peers[existing].address
@@ -102,7 +137,9 @@ struct PhoneDataKeys: Codable, Equatable, Sendable {
             return nil
         }
         let key = Curve25519.KeyAgreement.PrivateKey()
-        let peer = PhoneDataPeer(routerID: routerID, publicKey: key.publicKey.rawRepresentation, address: address)
+        let peer = PhoneDataPeer(
+            routerID: routerID, link: link, publicKey: key.publicKey.rawRepresentation,
+            address: address)
         if let existing { peers[existing] = peer } else { peers.append(peer) }
         return PhoneDataRouterKeys(
             routerPrivateKey: key.rawRepresentation.base64EncodedString(),
@@ -110,17 +147,39 @@ struct PhoneDataKeys: Codable, Equatable, Sendable {
             phonePublicKey: serverPublicKey.base64EncodedString())
     }
 
+    /// Forgets every link of the router.
     mutating func removeRouter(routerID: String) {
         peers.removeAll { $0.routerID == routerID }
     }
 
-    /// Moves a router's entry to its new `Router.id` (its address or username changed). Its keys and
-    /// tunnel address stay, so the router keeps working without being set up again.
+    /// Forgets one link of the router. Its other link stays, and the address is free again.
+    mutating func removeLink(routerID: String, link: PhoneDataLink) {
+        peers.removeAll { $0.routerID == routerID && $0.link == link }
+    }
+
+    /// Moves a router's entries, every link, to its new `Router.id` (its address or username
+    /// changed). Their keys and tunnel addresses stay, so the router keeps working without being set
+    /// up again. Entries already under the new id are replaced: the renamed router's keys win.
     mutating func renameRouter(from oldID: String, to newID: String) {
-        guard oldID != newID, let old = peers.first(where: { $0.routerID == oldID }) else { return }
+        guard oldID != newID, peers.contains(where: { $0.routerID == oldID }) else { return }
         peers.removeAll { $0.routerID == newID }
-        let moved = PhoneDataPeer(routerID: newID, publicKey: old.publicKey, address: old.address)
-        if let at = peers.firstIndex(where: { $0.routerID == oldID }) { peers[at] = moved }
+        peers = peers.map { peer in
+            guard peer.routerID == oldID else { return peer }
+            return PhoneDataPeer(
+                routerID: newID, link: peer.link, publicKey: peer.publicKey, address: peer.address)
+        }
+    }
+
+    /// The routers with a recent handshake, and over which links, given the tunnel addresses the
+    /// engine says have one. A router with both links up appears once, with both.
+    static func connectedLinks(
+        of peers: [PhoneDataPeer], addresses: Set<String>
+    ) -> [String: Set<PhoneDataLink>] {
+        var connected: [String: Set<PhoneDataLink>] = [:]
+        for peer in peers where addresses.contains(peer.address) {
+            connected[peer.routerID, default: []].insert(peer.link)
+        }
+        return connected
     }
 }
 
@@ -184,21 +243,33 @@ final class PhoneDataKeyStore {
         }
     }
 
-    /// A new key pair for the router, saved before it is returned. The iPhone's own key is made
-    /// here the first time. Nothing changes when it can't be saved.
-    func prepareRouter(routerID: String) throws -> PhoneDataRouterKeys {
+    /// A new key pair for one link of the router, saved before it is returned. The iPhone's own key
+    /// is made here the first time. Nothing changes when it can't be saved.
+    func prepareRouter(routerID: String, link: PhoneDataLink) throws -> PhoneDataRouterKeys {
         if let problem { throw problem }
         var updated = keys ?? PhoneDataKeys.new()
-        guard let result = updated.prepareRouter(routerID: routerID) else { throw PhoneDataKeyError.noFreeAddress }
+        guard let result = updated.prepareRouter(routerID: routerID, link: link) else {
+            throw PhoneDataKeyError.noFreeAddress
+        }
         try commit(updated)
         return result
     }
 
-    /// Nothing changes when it can't be saved. Forgetting a router nobody set up does nothing.
+    /// Every link of the router. Nothing changes when it can't be saved. Forgetting a router nobody
+    /// set up does nothing.
     func forgetRouter(routerID: String) throws {
         if let problem { throw problem }
         guard var updated = keys, updated.peers.contains(where: { $0.routerID == routerID }) else { return }
         updated.removeRouter(routerID: routerID)
+        try commit(updated)
+    }
+
+    /// One link of the router; its other link stays. Nothing changes when it can't be saved, or when
+    /// the link was never set up.
+    func forgetLink(routerID: String, link: PhoneDataLink) throws {
+        if let problem { throw problem }
+        guard var updated = keys, updated.hasPeer(routerID: routerID, link: link) else { return }
+        updated.removeLink(routerID: routerID, link: link)
         try commit(updated)
     }
 

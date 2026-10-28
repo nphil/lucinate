@@ -8,12 +8,13 @@ extension AppState {
     }
 }
 
-/// Phone Data: use this iPhone's mobile data for the router, over USB. Pushed from the card at
-/// the top of the TravelMate tab.
+/// Phone Data: use this iPhone's mobile data for the router, over a USB cable or over Wi-Fi.
+/// Pushed from the card at the top of the TravelMate tab.
 ///
 /// The status hero is built from the iPhone itself, so it still reads correctly when the router
-/// can't be reached. Everything under it is the router's side: the three setup steps until they
-/// are done, then how it works, the one-tap shortcut and removal.
+/// can't be reached. Everything under it is the router's side: the USB cable (the three setup
+/// steps until they are done, then one compact card), the Wi-Fi card, how it works and the
+/// one-tap shortcut.
 struct PhoneDataView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
@@ -32,6 +33,12 @@ struct PhoneDataView: View {
     @State private var isRestartingPairing = false
     /// Why the last "Try Again" didn't work, in the router's plain words.
     @State private var pairingError: String?
+    /// The Wi-Fi setup sheet: setting up for the first time, or linking again after the router
+    /// fell out of step with this iPhone.
+    @State private var wifiSheet: WifiSheet?
+    @State private var showWifiRemoveConfirm = false
+    /// The link being removed right now, so its card shows the progress.
+    @State private var removingLink: PhoneDataLink?
 
     /// The router is asked every 3 s while this screen is up, so plugging in shows live.
     private let pollInterval: Duration = .seconds(3)
@@ -45,6 +52,13 @@ struct PhoneDataView: View {
     private struct LoadTrigger: Equatable, Sendable {
         let routerID: String?
         let resumeCount: Int
+    }
+
+    private enum WifiSheet: String, Identifiable {
+        case setUp
+        case fix
+
+        var id: String { rawValue }
     }
 
     var body: some View {
@@ -64,6 +78,7 @@ struct PhoneDataView: View {
             .padding(Spacing.md)
             .animation(.smooth, value: controller.loaded)
             .animation(.smooth, value: controller.step)
+            .animation(.smooth, value: controller.state?.wifiConfigured)
         }
         // A short screen would not overscroll otherwise, and pull-to-refresh needs the bounce.
         .scrollBounceBehavior(.always, axes: .vertical)
@@ -99,14 +114,28 @@ struct PhoneDataView: View {
         .sheet(isPresented: $showShortcutSheet) {
             PhoneDataShortcutSheet()
         }
-        .alert("Remove Phone Data?", isPresented: $showRemoveConfirm) {
+        .sheet(item: $wifiSheet, onDismiss: { controller.clearActionError() }) { mode in
+            PhoneDataWifiSetupSheet(controller: controller, isFix: mode == .fix)
+        }
+        .alert("Remove USB setup?", isPresented: $showRemoveConfirm) {
             Button("Cancel", role: .cancel) {}
             Button("Remove", role: .destructive) {
                 remove()
             }
         } message: {
             Text(
-                "The router will stop using this iPhone and go back to Wi-Fi only. "
+                "The router will stop using this iPhone over the USB cable. "
+                    + "You can set it up again any time."
+            )
+        }
+        .alert("Remove Wi-Fi setup?", isPresented: $showWifiRemoveConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Remove", role: .destructive) {
+                removeWifi()
+            }
+        } message: {
+            Text(
+                "The router will stop joining this iPhone's hotspot and forget it. "
                     + "You can set it up again any time."
             )
         }
@@ -137,9 +166,7 @@ struct PhoneDataView: View {
             )
         } else if !controller.loaded {
             if let error = controller.loadError {
-                ErrorStateView(message: error) {
-                    Task { await reload() }
-                }
+                unreachableSection(error)
             } else {
                 loadingSkeleton
             }
@@ -148,26 +175,75 @@ struct PhoneDataView: View {
         }
     }
 
+    /// The router didn't answer. While it is using this iPhone's hotspot that is expected (the
+    /// iPhone isn't on the router's Wi-Fi then), so it isn't shown as a fault.
+    @ViewBuilder
+    private func unreachableSection(_ error: String) -> some View {
+        if routerIsOnHotspot {
+            EmptyStateView(
+                systemImage: "iphone.radiowaves.left.and.right",
+                title: "Router is on your hotspot",
+                message: "While the router uses your iPhone's hotspot, this iPhone can't open "
+                    + "its settings. Phone Data keeps working."
+            )
+        } else {
+            ErrorStateView(message: error) {
+                Task { await reload() }
+            }
+        }
+    }
+
     @ViewBuilder
     private var loadedSection: some View {
         if let message = controller.actionError {
-            errorBanner(message)
+            PhoneDataErrorBanner(message: message)
         }
         if needsFix {
             repairBanner
         } else if showsPairingBanner {
             pairingBanner
         }
-        if controller.step == .done {
+        usbSection
+        if let state = controller.state {
+            wifiCard(state)
+        }
+        if usbIsSetUp || wifiIsSetUp {
             howItWorksCard
             shortcutRow
+        }
+        if usbIsSetUp {
             tipRow
+        }
+    }
+
+    /// The USB cable: the three-step checklist until it is done, then one compact card.
+    @ViewBuilder
+    private var usbSection: some View {
+        if usbIsSetUp {
+            PhoneDataUSBCard(
+                routerID: appState.phoneDataRouterID, routerState: controller.state,
+                needsRepair: needsFix, isBusy: controller.isBusy,
+                removalMessage: removalMessage(for: .usb)
+            ) {
+                showRemoveConfirm = true
+            }
         } else {
             setupCard
         }
-        if canRemove {
-            removeButton
-        }
+    }
+
+    private func wifiCard(_ state: PhoneDataRouterState) -> some View {
+        PhoneDataWifiCard(
+            routerState: state, needsRepair: needsWifiRepair,
+            isBusy: controller.isBusy, removalMessage: removalMessage(for: .wifi),
+            onSetUp: { openWifiSheet(.setUp) },
+            onFix: { openWifiSheet(.fix) },
+            onRemove: { showWifiRemoveConfirm = true })
+    }
+
+    /// What the router is doing, on the card of the link being removed; nil for the other one.
+    private func removalMessage(for link: PhoneDataLink) -> String? {
+        removingLink == link ? (controller.busyMessage ?? "Removing…") : nil
     }
 
     private var loadingSkeleton: some View {
@@ -182,9 +258,13 @@ struct PhoneDataView: View {
         HStack(spacing: Spacing.sm) {
             ProgressView()
                 .controlSize(.small)
-            Text("Couldn't reach the router — retrying")
-                .font(.footnote)
-                .foregroundStyle(theme.textSecondary)
+            Text(
+                routerIsOnHotspot
+                    ? "The router is on your hotspot, so its settings can't be reached"
+                    : "Couldn't reach the router — retrying"
+            )
+            .font(.footnote)
+            .foregroundStyle(theme.textSecondary)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, Spacing.md)
@@ -206,15 +286,16 @@ struct PhoneDataView: View {
         return PhoneDataController.shared.needsKeyReset
     }
 
-    /// Set up, but the router holds a link for a different iPhone (or this iPhone lost its half),
-    /// so setup has to run again. The router's own step can't tell: it only sees the router.
-    /// Before the checklist is done its own button covers this.
+    /// The USB link is set up, but the router holds one for a different iPhone (or this iPhone
+    /// lost its half), so setup has to run again. The router's own step can't tell: it only sees
+    /// the router. Before the checklist is done its own button covers this. The Wi-Fi card has
+    /// its own Fix.
     private var needsFix: Bool {
         guard controller.loaded, controller.step == .done,
             controller.state?.configured == true,
             let routerID = appState.phoneDataRouterID
         else { return false }
-        if !PhoneDataController.shared.hasPeer(for: routerID) { return true }
+        if !PhoneDataController.shared.hasPeer(for: routerID, link: .usb) { return true }
         guard let phoneKey else { return false }
         return controller.needsRepair(phonePublicKey: phoneKey)
     }
@@ -228,11 +309,30 @@ struct PhoneDataView: View {
             && unlinkedPolls >= pairingHelpAfterPolls
     }
 
-    /// Something to remove: the router has the setup, or this iPhone remembers the router.
-    private var canRemove: Bool {
-        if controller.state?.configured == true { return true }
+    /// The router holds a Wi-Fi link for a different iPhone (or this iPhone lost its half).
+    private var needsWifiRepair: Bool {
+        guard controller.loaded, controller.state?.wifiConfigured == true,
+            let routerID = appState.phoneDataRouterID
+        else { return false }
+        if !PhoneDataController.shared.hasPeer(for: routerID, link: .wifi) { return true }
+        guard let phoneKey else { return false }
+        return controller.needsWifiRepair(phonePublicKey: phoneKey)
+    }
+
+    /// The USB cable is complete, so it shows as one compact card.
+    private var usbIsSetUp: Bool { controller.step == .done }
+
+    private var wifiIsSetUp: Bool { controller.state?.wifiConfigured == true }
+
+    /// Something to remove: the router has the USB setup. A key the iPhone keeps from an earlier
+    /// setup is no reason to offer Remove; setting up again replaces it.
+    private var canRemoveUSB: Bool { controller.state?.configured == true }
+
+    /// The router reaches this iPhone over Wi-Fi, so it is on the iPhone's hotspot: it isn't on
+    /// a network this iPhone can open its settings from.
+    private var routerIsOnHotspot: Bool {
         guard let routerID = appState.phoneDataRouterID else { return false }
-        return PhoneDataController.shared.hasPeer(for: routerID)
+        return PhoneDataController.shared.connectedLinks(for: routerID).contains(.wifi)
     }
 
     /// Which step of the checklist is current: 1...3, or 4 once everything is done.
@@ -256,8 +356,9 @@ struct PhoneDataView: View {
     private var setupCard: some View {
         Card {
             VStack(alignment: .leading, spacing: Spacing.md) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Set up")
+                HStack(spacing: Spacing.sm + 2) {
+                    PhoneDataIconBadge(systemImage: "cable.connector")
+                    Text("USB cable")
                         .font(.cardTitle)
                         .foregroundStyle(theme.textPrimary)
                     Spacer(minLength: Spacing.sm)
@@ -270,6 +371,14 @@ struct PhoneDataView: View {
                 connectStep
                 Divider().overlay(theme.separator)
                 finishStep
+                if canRemoveUSB {
+                    PhoneDataRemoveRow(
+                        title: "Remove USB Setup", workingText: removalMessage(for: .usb),
+                        isDisabled: controller.isBusy
+                    ) {
+                        showRemoveConfirm = true
+                    }
+                }
             }
         }
     }
@@ -417,30 +526,12 @@ struct PhoneDataView: View {
 
     // MARK: - Banners
 
-    private func errorBanner(_ message: String) -> some View {
-        HStack(alignment: .top, spacing: Spacing.sm) {
-            Image(systemName: "exclamationmark.triangle")
-                .foregroundStyle(theme.error)
-                .accessibilityHidden(true)
-            Text(message)
-                .font(.subheadline)
-                .foregroundStyle(theme.textPrimary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(Spacing.md)
-        .background(
-            theme.error.opacity(0.15),
-            in: .rect(cornerRadius: CornerRadius.card, style: .continuous)
-        )
-        .accessibilityElement(children: .combine)
-    }
-
     private var repairBanner: some View {
         // Fixing re-detects the iPhone on the router's USB port, so it has to be plugged in.
         let plugged = controller.state?.usbDevice != nil
         let advice = plugged ? "Tap Fix to link them again." : "Plug in this iPhone, then tap Fix."
         return attentionBanner(
-            title: "Link needs repair",
+            title: "USB link needs repair",
             message: "The router was set up with a different iPhone, or the link was lost. "
                 + advice,
             footnote: nil,
@@ -537,22 +628,46 @@ struct PhoneDataView: View {
     // MARK: - After setup
 
     private var howItWorksCard: some View {
-        Card {
+        let facts = howItWorksFacts
+        return Card {
             VStack(alignment: .leading, spacing: Spacing.md) {
                 Text("How it works")
                     .font(.cardTitle)
                     .foregroundStyle(theme.textPrimary)
-                PhoneDataFactRow(
-                    systemImage: "cable.connector",
-                    text: "Plugged in, Hotspot on: the router uses this iPhone's data.")
-                PhoneDataFactRow(
-                    systemImage: "wifi",
-                    text: "Unplugged: it goes back to hotel Wi-Fi.")
+                PhoneDataFactRow(systemImage: facts.onSymbol, text: facts.on)
+                PhoneDataFactRow(systemImage: "wifi", text: facts.off)
                 PhoneDataFactRow(
                     systemImage: "iphone",
                     text: "Keep Lucinate installed; it runs quietly in the background while sharing."
                 )
             }
+        }
+    }
+
+    private struct HowItWorks {
+        let onSymbol: String
+        let on: String
+        let off: String
+    }
+
+    /// What switches the router over to the iPhone depends on how it was set up.
+    private var howItWorksFacts: HowItWorks {
+        switch (usbIsSetUp, wifiIsSetUp) {
+        case (true, true):
+            HowItWorks(
+                onSymbol: "iphone.radiowaves.left.and.right",
+                on: "Plugged in or Hotspot on: the router uses this iPhone's data.",
+                off: "Unplugged and Hotspot off: it goes back to hotel Wi-Fi.")
+        case (false, true):
+            HowItWorks(
+                onSymbol: "iphone.radiowaves.left.and.right",
+                on: "Hotspot on: the router joins it and uses this iPhone's data.",
+                off: "Hotspot off: it goes back to hotel Wi-Fi.")
+        default:
+            HowItWorks(
+                onSymbol: "cable.connector",
+                on: "Plugged in, Hotspot on: the router uses this iPhone's data.",
+                off: "Unplugged: it goes back to hotel Wi-Fi.")
         }
     }
 
@@ -607,21 +722,6 @@ struct PhoneDataView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var removeButton: some View {
-        Button(role: .destructive) {
-            Haptics.warning()
-            showRemoveConfirm = true
-        } label: {
-            Label("Remove from Router", systemImage: "trash")
-                .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.large)
-        .tint(theme.error)
-        .disabled(controller.isBusy)
-        .padding(.top, Spacing.sm)
-    }
-
     // MARK: - Actions
 
     private func reload() async {
@@ -642,8 +742,9 @@ struct PhoneDataView: View {
     private func pollWhileVisible() async {
         while !Task.isCancelled {
             try? await Task.sleep(for: pollInterval)
+            // The Wi-Fi sheet makes the router scan; nothing behind it is in view anyway.
             guard !Task.isCancelled, appState.isAppActive, !controller.isBusy,
-                appState.service != nil
+                appState.service != nil, wifiSheet == nil
             else { continue }
             await reload()
         }
@@ -682,7 +783,7 @@ struct PhoneDataView: View {
                 pairingError = nil
                 Haptics.success()
                 appState.showToast(
-                    isFix ? "Fixed. The router uses this iPhone again." : "Phone Data is set up")
+                    isFix ? "Fixed. The router uses this iPhone again." : "USB sharing is set up")
             } else {
                 Haptics.warning()
                 appState.showToast(isFix ? "Couldn't fix the link" : "Couldn't finish setup")
@@ -695,7 +796,9 @@ struct PhoneDataView: View {
         guard let service = appState.service, let routerID = appState.phoneDataRouterID else {
             return
         }
+        removingLink = .usb
         Task {
+            defer { removingLink = nil }
             let ok = await controller.remove(
                 service: service, routerID: routerID, phone: PhoneDataController.shared)
             if ok {
@@ -703,12 +806,38 @@ struct PhoneDataView: View {
                 unseenPolls = 0
                 pairingError = nil
                 Haptics.success()
-                appState.showToast("Phone Data removed from this router")
+                appState.showToast("USB setup removed")
             } else {
                 Haptics.warning()
-                appState.showToast("Couldn't remove Phone Data")
+                appState.showToast("Couldn't remove USB setup")
             }
         }
+    }
+
+    private func removeWifi() {
+        guard let service = appState.service, let routerID = appState.phoneDataRouterID else {
+            return
+        }
+        removingLink = .wifi
+        Task {
+            defer { removingLink = nil }
+            let ok = await controller.removeWifi(
+                service: service, routerID: routerID, phone: PhoneDataController.shared)
+            if ok {
+                Haptics.success()
+                appState.showToast("Wi-Fi setup removed")
+            } else {
+                Haptics.warning()
+                appState.showToast("Couldn't remove Wi-Fi setup")
+            }
+        }
+    }
+
+    /// Opens the Wi-Fi sheet with a clean slate: an error left by an earlier action isn't about
+    /// what the sheet is about to do.
+    private func openWifiSheet(_ mode: WifiSheet) {
+        controller.clearActionError()
+        wifiSheet = mode
     }
 
     /// Gives up on the iPhone's unreadable keys for new ones. The routers set up before have to
@@ -764,7 +893,7 @@ private struct PhoneDataStatusHero: View {
         ElevatedCard {
             VStack(alignment: .leading, spacing: Spacing.md) {
                 header(presentation)
-                if presentation == .sharing {
+                if presentation.isSharing {
                     speeds(phone)
                 }
                 details(presentation, phone: phone)
@@ -784,7 +913,7 @@ private struct PhoneDataStatusHero: View {
                 } else {
                     StatusDot(
                         color: presentation.color(in: theme), size: 12,
-                        glows: presentation == .sharing)
+                        glows: presentation.isSharing)
                 }
                 Text(presentation.title)
                     .font(.title2.weight(.bold))
@@ -857,8 +986,12 @@ private struct PhoneDataStatusHero: View {
             return Source(text: "iPhone data", color: theme.success)
         case .waitingForPhone, .waitingForRouter, .problem:
             guard let routerState else { return nil }
+            // Whichever tunnel is up or on its way, the router is reaching for the iPhone; the
+            // hotel Wi-Fi is what it falls back to.
+            let reachingIPhone =
+                routerState.tunnelUp || routerState.wifiTunnelUp || routerState.wifiUplinkActive
             return Source(
-                text: routerState.tunnelUp ? "Connecting to iPhone…" : "Wi-Fi",
+                text: reachingIPhone ? "Connecting to iPhone…" : "Wi-Fi",
                 color: theme.textPrimary)
         }
     }

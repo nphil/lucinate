@@ -8,12 +8,13 @@ import SwiftUI
 enum PhoneDataPresentation: Equatable {
     /// This router has no saved link to this iPhone.
     case notSetUp
-    /// Set up, but there is no hotspot link yet: iPhone unplugged or Personal Hotspot off.
-    case waitingForPhone
+    /// Set up, but Personal Hotspot is off, so there is no link yet. `setUp` is how this router
+    /// was set up to reach the iPhone (USB, Wi-Fi or both), which decides what to ask for.
+    case waitingForPhone(setUp: Set<PhoneDataLink>)
     /// The iPhone is ready and listening; this router hasn't connected yet.
     case waitingForRouter
-    /// This router is using the iPhone's data.
-    case sharing
+    /// This router is using the iPhone's data, over these links.
+    case sharing(links: Set<PhoneDataLink>)
     /// The phone side failed; the string is its plain-language reason.
     case problem(String)
 
@@ -29,14 +30,21 @@ enum PhoneDataPresentation: Equatable {
         case .notSetUp:
             return .notSetUp
         case .waitingForHotspot:
-            return .waitingForPhone
+            let setUp = Set(PhoneDataLink.allCases.filter { phone.hasPeer(for: routerID, link: $0) })
+            return .waitingForPhone(setUp: setUp)
         case .waitingForRouter:
             return .waitingForRouter
         case .sharing:
-            return phone.isRouterConnected(routerID) ? .sharing : .waitingForRouter
+            guard phone.isRouterConnected(routerID) else { return .waitingForRouter }
+            return .sharing(links: phone.connectedLinks(for: routerID))
         case .problem(let reason):
             return .problem(reason)
         }
+    }
+
+    var isSharing: Bool {
+        if case .sharing = self { return true }
+        return false
     }
 
     /// Status dot / accent colour for this state.
@@ -52,22 +60,37 @@ enum PhoneDataPresentation: Equatable {
     /// The one line shown on the card (the sharing line adds live speeds on top of "Sharing").
     var summaryLine: String {
         switch self {
-        case .notSetUp: "Use this iPhone's data for the router, over USB."
-        case .waitingForPhone: "Plug in your iPhone and turn on Personal Hotspot"
+        case .notSetUp: "Use this iPhone's data for the router, over USB or Wi-Fi."
+        case .waitingForPhone(let setUp):
+            setUp.contains(.wifi)
+                ? "Turn on Personal Hotspot"
+                : "Plug in your iPhone and turn on Personal Hotspot"
         case .waitingForRouter: "Waiting for the router…"
         case .sharing: "Sharing"
         case .problem(let reason): reason
         }
     }
 
-    /// Big title of the status hero.
+    /// Big title of the status hero. A router that is sharing says how: over the cable, over
+    /// Wi-Fi, or both when both links are up at once.
     var title: String {
         switch self {
         case .notSetUp: "Not set up yet"
         case .waitingForPhone: "Waiting for your iPhone"
         case .waitingForRouter: "Waiting for the router"
-        case .sharing: "Sharing iPhone data"
+        case .sharing(let links): Self.sharingTitle(links: links)
         case .problem: "Can't share iPhone data"
+        }
+    }
+
+    /// An empty set (the router counts as connected but no link says so) gets no link named,
+    /// rather than a wrong one.
+    static func sharingTitle(links: Set<PhoneDataLink>) -> String {
+        switch (links.contains(.usb), links.contains(.wifi)) {
+        case (true, true): "Sharing over USB and Wi-Fi"
+        case (true, false): "Sharing over USB"
+        case (false, true): "Sharing over Wi-Fi"
+        case (false, false): "Sharing iPhone data"
         }
     }
 
@@ -76,11 +99,9 @@ enum PhoneDataPresentation: Equatable {
     func detail(routerSeesPhone: Bool) -> String {
         switch self {
         case .notSetUp:
-            "Use this iPhone's data for the router, over USB."
-        case .waitingForPhone:
-            routerSeesPhone
-                ? "The router can see your iPhone. Turn on Personal Hotspot, and tap Trust if it asks."
-                : "Plug it into the router's USB port and turn on Personal Hotspot."
+            "Use this iPhone's data for the router, over USB or Wi-Fi."
+        case .waitingForPhone(let setUp):
+            Self.waitingDetail(setUp: setUp, routerSeesPhone: routerSeesPhone)
         case .waitingForRouter:
             "Your iPhone is ready. The router will connect in a moment."
         case .sharing:
@@ -88,6 +109,21 @@ enum PhoneDataPresentation: Equatable {
         case .problem(let reason):
             reason
         }
+    }
+
+    /// What is still missing before the router can reach the iPhone: Personal Hotspot always,
+    /// and the cable only when USB is the way this router was set up.
+    private static func waitingDetail(setUp: Set<PhoneDataLink>, routerSeesPhone: Bool) -> String {
+        if routerSeesPhone {
+            return "The router can see your iPhone. Turn on Personal Hotspot, and tap Trust if it asks."
+        }
+        guard setUp.contains(.wifi) else {
+            return "Plug it into the router's USB port and turn on Personal Hotspot."
+        }
+        return setUp.contains(.usb)
+            ? "Turn on Personal Hotspot. The router uses the cable if it's plugged in, "
+                + "or joins over Wi-Fi."
+            : "Turn on Personal Hotspot. The router will join it over Wi-Fi."
     }
 }
 
@@ -175,6 +211,58 @@ struct PhoneDataStepMarker: View {
     }
 }
 
+/// One numbered instruction of a how-to list. The text is markdown, so the names of things to
+/// tap can be bold; VoiceOver gets it without the asterisks.
+struct PhoneDataInstructionRow: View {
+    let number: Int
+    let text: String
+
+    @Environment(\.theme) private var theme
+    @ScaledMetric(relativeTo: .subheadline) private var markerSize: CGFloat = 26
+
+    private var spokenText: String {
+        text.replacingOccurrences(of: "**", with: "")
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: Spacing.sm) {
+            PhoneDataStepMarker(number: number, mark: .current, size: markerSize)
+            Text(LocalizedStringKey(text))
+                .font(.subheadline)
+                .foregroundStyle(theme.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, minHeight: markerSize, alignment: .leading)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Step \(number). \(spokenText)")
+    }
+}
+
+/// Something went wrong: the reason, in plain words, on a red tint.
+struct PhoneDataErrorBanner: View {
+    let message: String
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(alignment: .top, spacing: Spacing.sm) {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(theme.error)
+                .accessibilityHidden(true)
+            Text(message)
+                .font(.subheadline)
+                .foregroundStyle(theme.textPrimary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(Spacing.md)
+        .background(
+            theme.error.opacity(0.15),
+            in: .rect(cornerRadius: CornerRadius.card, style: .continuous)
+        )
+        .accessibilityElement(children: .combine)
+    }
+}
+
 // MARK: - Card
 
 /// Compact entry to Phone Data at the top of the TravelMate tab: one status line, and a tap
@@ -247,7 +335,7 @@ struct PhoneDataCard: View {
             // it on the lowercase letters.
             HStack(alignment: .firstTextBaseline, spacing: Spacing.sm) {
                 StatusDot(
-                    color: presentation.color(in: theme), size: 8, glows: presentation == .sharing)
+                    color: presentation.color(in: theme), size: 8, glows: presentation.isSharing)
                 statusText(for: presentation, phone: phone)
                     .font(.subheadline)
                     .foregroundStyle(theme.textSecondary)
@@ -259,7 +347,7 @@ struct PhoneDataCard: View {
     private func statusText(for presentation: PhoneDataPresentation, phone: PhoneDataController)
         -> Text
     {
-        guard presentation == .sharing else { return Text(presentation.summaryLine) }
+        guard presentation.isSharing else { return Text(presentation.summaryLine) }
         let down = PhoneDataFormat.rate(bitsPerSecond: phone.downBitsPerSecond)
         let up = PhoneDataFormat.rate(bitsPerSecond: phone.upBitsPerSecond)
         return Text(
@@ -274,7 +362,7 @@ struct PhoneDataCard: View {
         case .sharing:
             let down = PhoneDataFormat.spokenRate(bitsPerSecond: phone.downBitsPerSecond)
             let up = PhoneDataFormat.spokenRate(bitsPerSecond: phone.upBitsPerSecond)
-            return "Sharing. Download \(down). Upload \(up)."
+            return "\(presentation.title). Download \(down). Upload \(up)."
         case .notSetUp:
             return "Not set up. \(presentation.summaryLine)"
         case .waitingForPhone, .waitingForRouter, .problem:

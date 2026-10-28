@@ -258,16 +258,26 @@ struct TravelmateUplink: Sendable, Identifiable, Equatable {
     let enabled: Bool
     /// Optional BSSID pin. The app never sets one, but uplinks added in LuCI may.
     let bssid: String
+    /// The WireGuard interface travelmate brings up together with this uplink (`vpniface`). Phone
+    /// Data over Wi-Fi sets it on the iPhone's hotspot.
+    let vpniface: String
 
-    init(sectionId: String, ssid: String, device: String, enabled: Bool, bssid: String = "") {
+    init(
+        sectionId: String, ssid: String, device: String, enabled: Bool, bssid: String = "",
+        vpniface: String = ""
+    ) {
         self.sectionId = sectionId
         self.ssid = ssid
         self.device = device
         self.enabled = enabled
         self.bssid = bssid
+        self.vpniface = vpniface
     }
 
     var id: String { sectionId }
+
+    /// The iPhone's hotspot, saved by Phone Data to carry its Wi-Fi tunnel.
+    var carriesPhoneData: Bool { vpniface == PhoneDataRouterConfig.wifiInterface }
 
     /// Whether this saved uplink is the one currently connected.
     func isActive(given status: TravelmateStatus) -> Bool {
@@ -282,7 +292,8 @@ struct TravelmateUplink: Sendable, Identifiable, Equatable {
             device: section["device"].coercedString ?? "",
             // Travelmate reads a missing `enabled` as off (`f_getval "enabled" "0"`).
             enabled: section["enabled"].coercedString == "1",
-            bssid: section["bssid"].coercedString ?? ""
+            bssid: section["bssid"].coercedString ?? "",
+            vpniface: section["vpniface"].coercedString ?? ""
         )
     }
 }
