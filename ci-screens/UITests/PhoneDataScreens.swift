@@ -60,6 +60,10 @@ final class PhoneDataScreens: XCTestCase {
             }
         }
         for _ in 0..<4 { app.swipeDown() }
+        app.swipeUp()
+        sleep(1)
+        shot(app, "\(tag)-4-phone-data-middle")
+        app.swipeUp()
         sleep(1)
         shot(app, "\(tag)-5-phone-data-bottom")
 
