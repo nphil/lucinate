@@ -16,6 +16,11 @@ git and in the `ios-v1.1.x` release tags.
   (`pip install cairosvg`) renders the 1024 light/dark/tinted PNGs into
   `Lucinate/Resources/Assets.xcassets/AppIcon.appiconset/`. The PNGs are
   committed, so a build needs no icon tooling.
+- The Phone Data engine is **Go** (`PhoneDataEngine/`, vendored from Tether,
+  MIT). `xcodegen generate` runs `scripts/build-phone-data-engine.sh` first, so
+  a local build needs Go (`brew install go`); CI installs it with
+  `actions/setup-go` from `PhoneDataEngine/go.mod`. Go tests run on Linux:
+  download the Go tarball to /tmp and `go -C PhoneDataEngine test ./...`.
 
 ## Router-side constraints (learned against OpenWrt 25.12)
 
@@ -30,6 +35,17 @@ git and in the `ios-v1.1.x` release tags.
   it afterwards.
 - Swift logic that only needs Foundation can be compiled and unit-tested on
   the NAS with `docker run swift:6.1-noble` (`ssh unraid`) before CI.
+- Stock LuCI ACLs grant ubus `file list` on every path, but `file exec` only
+  for specific command lines: `/etc/init.d/usbmuxd`, `network reload` and
+  `firewall reload` are not granted, so treat them as best effort. rpcd's
+  `uci commit` already makes procd reload network/firewall. rpcd's `uci set`
+  refuses an empty list (delete the option instead).
+- `list-installed` is heavy (apk query over cgi-exec); never call it on every
+  poll tick.
+- Phone Data router config: `phone_usb` (dhcp on the ipheth netdev, found by
+  listing `/sys/bus/usb/drivers/ipheth/<usb-if>/net`) and `phone_wg`
+  (`tunlink phone_usb`; netifd's host dependency keeps it down while the
+  iPhone is unplugged). usbmuxd keeps Trust records in `/etc/lockdown`.
 
 ## iOS distribution: Feather / AltStore source
 

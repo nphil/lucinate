@@ -4,6 +4,9 @@ options:
   deploymentTarget:
     iOS: "26.0"
   createIntermediateGroups: true
+  # Builds the Phone Data engine (Go) into PhoneDataEngine/build/LucinateWG.xcframework before the
+  # project is generated. It skips the build when the Go sources haven't changed. Needs Go.
+  preGenCommand: scripts/build-phone-data-engine.sh
 settings:
   base:
     SWIFT_VERSION: "6.0"
@@ -19,6 +22,14 @@ targets:
     platform: iOS
     sources:
       - Lucinate
+    dependencies:
+      # The engine is a static library, linked into the app. Its module map is what makes
+      # `import LucinateWG` work, and links libresolv.
+      - framework: PhoneDataEngine/build/LucinateWG.xcframework
+        embed: false
+      # Go's iOS runtime calls CoreFoundation (runtime/sys_ios_arm64.go). The engine uses no other
+      # system framework: nothing in it reaches crypto/x509, which is what would need Security.
+      - sdk: CoreFoundation.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.cogwheel.lucimobile
@@ -32,6 +43,11 @@ targets:
       - LucinateTests
     dependencies:
       - target: Lucinate
+      # The tests import the app's module, which imports LucinateWG, so they need to find that
+      # module too. Nothing in the tests uses the engine, so the linker leaves its code out of the
+      # test bundle: the app, which hosts the tests, has the one copy of Go's runtime.
+      - framework: PhoneDataEngine/build/LucinateWG.xcframework
+        embed: false
 schemes:
   Lucinate:
     build:

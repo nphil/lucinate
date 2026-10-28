@@ -11,6 +11,8 @@ on:
     paths:
       - "Lucinate/**"
       - "LucinateTests/**"
+      - "PhoneDataEngine/**"
+      - "scripts/**"
       - "project.yml"
       - "Support/**"
       - ".github/workflows/ios-native-build.yml"
@@ -32,9 +34,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The Phone Data engine is Go. xcodegen builds it into an xcframework (preGenCommand in
+      # project.yml runs scripts/build-phone-data-engine.sh), so Go has to be there before it runs.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: PhoneDataEngine/go.mod
+          cache: true
+          cache-dependency-path: PhoneDataEngine/go.sum
+
+      # Fails fast, before the much slower Xcode build.
+      - name: Phone Data engine tests
+        run: go -C PhoneDataEngine test ./...
+
       - name: Install XcodeGen
         run: command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
 
+      # Also builds the Phone Data engine, see above.
       - name: Generate project
         run: xcodegen generate
 

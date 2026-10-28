@@ -29,6 +29,11 @@
 	<!-- Router-management app: stays on the router's Wi-Fi and makes iOS more willing to show its hotel sign-in sheet over the app. -->
 	<key>UIRequiresPersistentWiFi</key>
 	<true/>
+	<!-- Phone Data: a silent looping sound keeps Lucinate running in the background while the iPhone shares its data with a travel router (KeepAlive.swift). -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>NSAppTransportSecurity</key>
@@ -37,7 +42,7 @@
 		<true/>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Lucinate connects to your OpenWrt router on the local network to manage it.</string>
+	<string>Lucinate connects to your OpenWrt router on the local network to manage it, and lets your router in over Personal Hotspot to share this iPhone's data.</string>
 	<key>UIRequiredDeviceCapabilities</key>
 	<array>
 		<string>arm64</string>

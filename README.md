@@ -8,13 +8,14 @@ Flutter app, which was removed — its history remains in git and in the
 ## Open & build
 
 ```bash
-xcodegen generate        # brew install xcodegen (project is generated, never committed)
+xcodegen generate        # brew install xcodegen go (xcodegen first builds the Go Phone Data engine)
 open Lucinate.xcodeproj  # scheme: Lucinate
 ```
 
 CI (`.github/workflows/ios-native-build.yml`) runs on every push to
 `claude/native-swift-rewrite*` branches: GitHub's `xcode-27` runner (Xcode 27 /
-iOS 27 SDK), `xcodegen generate`, simulator build, then unit tests on the first
+iOS 27 SDK), Go set up from `PhoneDataEngine/go.mod`, the engine's Go tests,
+`xcodegen generate`, simulator build, then unit tests on the first
 available iPhone simulator. The deployment target stays iOS 26. That workflow is
 the compile gate for this code — it was developed on a Linux container with no
 Swift toolchain.
@@ -37,8 +38,27 @@ Swift toolchain.
   session jar (robust across redirects). A future option is the native
   `/ubus` endpoint (`uhttpd-mod-ubus` + `session.login`), which would drop the
   cookie dance — not used because it requires extra router-side setup.
-- **No third-party dependencies.** Foundation/SwiftUI/Charts/Security/Network/
-  WebKit only.
+- **No third-party Swift dependencies.** Foundation/SwiftUI/Charts/Security/Network/
+  WebKit/CryptoKit/AppIntents/AVFoundation only. The one exception is the Phone
+  Data engine, below.
+- **Phone Data (TravelMate tab) shares the iPhone's cellular data over USB.**
+  Personal Hotspot gives the iPhone `172.20.10.1` on a bridge interface; Lucinate
+  runs a WireGuard server there (`PhoneDataEngine/`, Go: wireguard-go + gVisor,
+  vendored from [Tether](https://github.com/viktor-svirsky/tether), MIT). It
+  re-dials every connection from the iPhone with sockets bound to the cellular
+  interface, so the carrier sees phone traffic, not hotspot traffic, and nothing
+  loops when the iPhone is also on the router's Wi-Fi. Swift has no WireGuard or
+  userspace TCP/IP stack, so the engine stays Go; `scripts/build-phone-data-engine.sh`
+  (run by `xcodegen generate`) builds `PhoneDataEngine/build/LucinateWG.xcframework`.
+  Router side (packages `kmod-usb-net-ipheth usbmuxd kmod-wireguard wireguard-tools`):
+  interface `phone_usb` (DHCP on the iPhone's USB netdev, no default route, no
+  peer DNS) and `phone_wg` (WireGuard, `tunlink phone_usb`, peer
+  `172.20.10.1:51820`, allowed IPs `0.0.0.0/1 128.0.0.0/1`), both in the `wan`
+  zone. netifd's host dependency keeps `phone_wg` down unless `phone_usb` is up,
+  so unplugging falls back to the travelmate uplink with no script on the
+  router. The app keeps running in the background with a silent audio loop while
+  the hotspot is up (sideloaded app; App Store review would reject it). Shortcuts
+  action "Use Phone Data" wakes it.
 - **Session recovery.** LuCI answers an expired session with JSON-RPC -32002
   "Access denied" for every call. The client re-logs in once (shared by
   concurrent callers) and retries; an object missing from the session-free
@@ -75,6 +95,7 @@ Swift toolchain.
 | 4 | Tier A: Control Center quick toggles, Wi-Fi AP editor, DHCP static leases, client actions (Reserve IP / WoL / block) | ✅ green |
 | 5 | Tier B: port forwards + firewall rule toggles, system/kernel log viewer, ping diagnostic | ✅ green |
 | 6 | Polish pass + this README | ✅ |
+| 7 | Phone Data over USB: Go engine, router setup, TravelMate card + screen, Shortcuts | ✅ green (real-router test pending) |
 
 ### Not done (Tier C / known gaps)
 
@@ -110,11 +131,19 @@ Swift toolchain.
    auto-reconnect when the router returns.
 9. **Themes**: all 20 palettes reskin every screen incl. chart colors;
    System/Light/Dark mode switching.
+10. **Phone Data**: TravelMate → Phone Data → Install, plug the iPhone into the
+    router's USB port with Personal Hotspot on, tap Trust, Finish. The router
+    should then use the iPhone's data (speeds on the screen move), fall back to
+    hotel Wi-Fi when unplugged, and come back when plugged in again. Check it
+    keeps sharing with the screen locked (Settings → Face ID & Passcode → USB
+    Accessories on) and after the "Use Phone Data" shortcut.
 
 ## Layout
 
 ```
-  project.yml           XcodeGen spec (Swift 6, iOS 26, unsigned CI builds)
+  project.yml           XcodeGen spec (Swift 6, iOS 26, unsigned CI builds; builds the engine first)
+  PhoneDataEngine/      Go WireGuard server for Phone Data (from Tether, MIT) + its tests
+  scripts/              build-phone-data-engine.sh (Go → LucinateWG.xcframework)
   Icon/                 SVG icon source + generator (light/dark/tinted PNGs)
   Support/Info.plist    ATS allows LAN http; local-network usage string
   Lucinate/
@@ -131,6 +160,8 @@ Swift toolchain.
       Network/          Clients, Interfaces, Wi-Fi editor, Static Leases, Firewall
       TravelMate/       Controller + screens (scan, channel picker)
       Tailscale/        Controller + screen
+      PhoneData/        iPhone side (keys, engine bridge, keep-alive, Shortcuts),
+                        router setup controller, TravelMate card + screen
       ControlCenter/    Connection pill accessory + quick-controls sheet
       Diagnostics/      Log viewer (logread/dmesg) + ping
       Settings/         Settings sheet, theme pickers, Manage Routers, About

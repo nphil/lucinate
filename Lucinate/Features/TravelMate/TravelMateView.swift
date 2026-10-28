@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// TravelMate: master switch, live uplink status, broadcast band/channel
+/// TravelMate: the Phone Data card, master switch, live uplink status, broadcast band/channel
 /// controls, and saved uplinks. Mirrors `lib/screens/travelmate_screen.dart`.
 struct TravelMateView: View {
     @Environment(AppState.self) private var appState
@@ -103,6 +103,8 @@ struct TravelMateView: View {
     private var notInstalledView: some View {
         ScrollView {
             VStack(spacing: Spacing.md) {
+                // Phone Data doesn't need the travelmate package, so it stays reachable here.
+                PhoneDataCard()
                 EmptyStateView(
                     systemImage: "suitcase",
                     title: "TravelMate isn't installed on this router",
@@ -114,8 +116,10 @@ struct TravelMateView: View {
                 .buttonStyle(.bordered)
                 .tint(theme.accent)
             }
-            .containerRelativeFrame(.vertical)
+            .padding(Spacing.md)
         }
+        // A short screen would not overscroll otherwise, and pull-to-refresh needs the bounce.
+        .scrollBounceBehavior(.always, axes: .vertical)
         .refreshable {
             await loadIfPossible()
         }
@@ -124,6 +128,7 @@ struct TravelMateView: View {
     private var loadedContent: some View {
         ScrollView {
             VStack(spacing: Spacing.md) {
+                PhoneDataCard()
                 if controller.refreshFailed {
                     refreshNotice
                 }
@@ -147,6 +152,8 @@ struct TravelMateView: View {
     private var loadingSkeleton: some View {
         ScrollView {
             VStack(spacing: Spacing.md) {
+                // Same height as the Phone Data card that tops the loaded screen.
+                Card { SkeletonBlock(height: 36) }
                 Card { SkeletonBlock(height: 28) }
                 Card {
                     VStack(spacing: Spacing.sm) {

@@ -60,6 +60,12 @@ struct AboutView: View {
                     .font(.caption)
                     .foregroundStyle(theme.textSecondary)
 
+                Text("Phone Data uses code from [Tether](https://github.com/viktor-svirsky/tether) by Viktor Svirsky (MIT), [wireguard-go](https://git.zx2c4.com/wireguard-go) (MIT) and [gVisor](https://gvisor.dev) (Apache 2.0).")
+                    .font(.caption)
+                    .foregroundStyle(theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, Spacing.lg)
+
                 routerDetailsCard
             }
             .frame(maxWidth: .infinity)
