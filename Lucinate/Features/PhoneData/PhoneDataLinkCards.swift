@@ -196,8 +196,6 @@ struct PhoneDataWifiCard: View {
     let routerState: PhoneDataRouterState
     /// The router's link no longer matches this iPhone.
     let needsRepair: Bool
-    /// There is something to remove: the router has the setup, or this iPhone remembers it.
-    let canRemove: Bool
     /// Something is running, so nothing new can start.
     let isBusy: Bool
     /// Non-nil while this link is being removed: what the router is doing.
@@ -243,9 +241,6 @@ struct PhoneDataWifiCard: View {
             )
             .font(.subheadline)
             .foregroundStyle(theme.textSecondary)
-            if canRemove {
-                removeRow
-            }
         }
     }
 

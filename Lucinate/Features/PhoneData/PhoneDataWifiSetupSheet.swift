@@ -24,8 +24,29 @@ struct PhoneDataWifiSetupSheet: View {
     @State private var password = ""
     @State private var showPassword = false
     @FocusState private var passwordFocused: Bool
+    @FocusState private var nameFocused: Bool
+
+    /// The hotspot is typed in rather than picked: the iPhone often can't broadcast it while it
+    /// is itself on the router's Wi-Fi, which it has to be to reach the router during setup.
+    @State private var isManual = false
+    @State private var manualName = ""
+    @State private var manualBand = ManualBand.fiveGHz
+
+    /// The band typed-in hotspots are joined on. 5 GHz unless Maximize Compatibility is on.
+    private enum ManualBand: CaseIterable, Identifiable {
+        case fiveGHz
+        case twoPointFourGHz
+
+        var id: Self { self }
+        var band: Int { self == .fiveGHz ? 5 : 2 }
+        var label: String { Travelmate.bandLabel(for: band) }
+    }
 
     private static let passwordRowID = "hotspot-password"
+    private static let nameRowID = "hotspot-name"
+    /// Where a field lands when scrolled to: in the upper part of the list, clear of the Connect
+    /// bar and of the keyboard.
+    private static let fieldAnchor = UnitPoint(x: 0.5, y: 0.3)
 
     var body: some View {
         NavigationStack {
@@ -33,8 +54,11 @@ struct PhoneDataWifiSetupSheet: View {
                 List {
                     hintSection
                     hotspotsSection
-                    if let selected {
-                        passwordSection(for: selected)
+                    if isManual {
+                        manualSection
+                    }
+                    if let encryption = currentEncryption {
+                        passwordSection(encryption: encryption)
                     }
                 }
                 .listStyle(.insetGrouped)
@@ -47,6 +71,17 @@ struct PhoneDataWifiSetupSheet: View {
                 .safeAreaInset(edge: .bottom, spacing: 0) { connectBar }
                 .onChange(of: selected?.rowID) { _, newID in
                     if newID != nil { revealPassword(proxy) }
+                }
+                .onChange(of: isManual) { _, nowManual in
+                    if nowManual { revealName() }
+                }
+                // The keyboard takes a moment to rise; scrolling before it has would measure
+                // against the full-height list and leave the field behind it.
+                .onChange(of: passwordFocused) { _, focused in
+                    if focused { scroll(proxy, to: Self.passwordRowID, afterKeyboard: true) }
+                }
+                .onChange(of: nameFocused) { _, focused in
+                    if focused { scroll(proxy, to: Self.nameRowID, afterKeyboard: true) }
                 }
             }
             .navigationTitle(isFix ? "Fix Wi-Fi" : "Set Up Wi-Fi")
@@ -100,9 +135,8 @@ struct PhoneDataWifiSetupSheet: View {
     private static let steps = [
         Step(
             id: 1,
-            text: "On your iPhone, open **Settings › Personal Hotspot** and turn on "
-                + "**Allow Others to Join**."),
-        Step(id: 2, text: "Stay on that screen, so the router can see your iPhone."),
+            text: "Open **Settings › Personal Hotspot** and turn on **Allow Others to Join**."),
+        Step(id: 2, text: "Stay on that screen so the router can find it."),
     ]
 
     private var hintSection: some View {
@@ -118,15 +152,17 @@ struct PhoneDataWifiSetupSheet: View {
                         .accessibilityHidden(true)
                     Text(
                         LocalizedStringKey(
-                            "Not in the list? Turn on **Maximize Compatibility** there, "
+                            "Can't find it? Turn on **Maximize Compatibility** there, "
                                 + "then scan again.")
                     )
                     .font(.footnote)
                     .foregroundStyle(theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .accessibilityElement(children: .combine)
             }
+            .fixedSize(horizontal: false, vertical: true)
             .padding(.vertical, Spacing.xs)
             .listRowBackground(theme.surface)
         } header: {
@@ -163,6 +199,7 @@ struct PhoneDataWifiSetupSheet: View {
                 )
                 .listRowBackground(theme.surface)
             }
+            manualEntryRow
         } header: {
             Text("Choose your iPhone")
         }
@@ -187,7 +224,7 @@ struct PhoneDataWifiSetupSheet: View {
         ZStack {
             theme.surface
             if isSelected {
-                theme.accent.opacity(0.12)
+                theme.accent.opacity(0.18)
             }
         }
     }
@@ -210,6 +247,7 @@ struct PhoneDataWifiSetupSheet: View {
                     bandChip(hotspot)
                     Spacer(minLength: Spacing.sm)
                     signalText(hotspot)
+                    selectionMark(isSelected)
                 }
                 HStack(alignment: .top, spacing: Spacing.sm) {
                     leadingIcon(hotspot, isSelected: isSelected)
@@ -223,6 +261,7 @@ struct PhoneDataWifiSetupSheet: View {
                         }
                     }
                     Spacer(minLength: 0)
+                    selectionMark(isSelected)
                 }
             }
             .contentShape(.rect)
@@ -237,9 +276,7 @@ struct PhoneDataWifiSetupSheet: View {
     private func leadingIcon(_ hotspot: PhoneDataHotspot, isSelected: Bool) -> some View {
         let phone = hotspot.looksLikeIPhone
         let name: String
-        if isSelected {
-            name = "checkmark.circle.fill"
-        } else if phone {
+        if phone {
             name = "iphone"
         } else {
             name = hotspot.encryption == "none" ? "wifi" : "lock.fill"
@@ -247,6 +284,16 @@ struct PhoneDataWifiSetupSheet: View {
         return Image(systemName: name)
             .foregroundStyle(isSelected || phone ? theme.accent : theme.textSecondary)
             .frame(width: iconWidth)
+            .accessibilityHidden(true)
+    }
+
+    /// The checkmark at the end of the chosen row. Its room is kept on the other rows, so
+    /// choosing one doesn't shift the signal readings.
+    private func selectionMark(_ isSelected: Bool) -> some View {
+        Image(systemName: "checkmark")
+            .font(.body.weight(.semibold))
+            .foregroundStyle(theme.accent)
+            .opacity(isSelected ? 1 : 0)
             .accessibilityHidden(true)
     }
 
@@ -280,12 +327,73 @@ struct PhoneDataWifiSetupSheet: View {
         return parts.joined(separator: ", ")
     }
 
+    // MARK: - A hotspot typed in
+
+    /// The way in when the scan can't list the iPhone: the last row of the list, styled as
+    /// chosen once the name is being typed.
+    private var manualEntryRow: some View {
+        Button {
+            selectManual()
+        } label: {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: "keyboard")
+                    .foregroundStyle(isManual ? theme.accent : theme.textSecondary)
+                    .frame(width: iconWidth)
+                    .accessibilityHidden(true)
+                Text("Not in the list? Enter its name")
+                    .font(.subheadline)
+                    .foregroundStyle(isManual ? theme.textPrimary : theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: Spacing.sm)
+                selectionMark(isManual)
+            }
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isManual ? .isSelected : [])
+        .listRowBackground(rowBackground(isSelected: isManual))
+    }
+
+    /// The hotspot's name and the band it is on, for a hotspot the scan didn't list. The band
+    /// picks which of the router's radios joins it.
+    private var manualSection: some View {
+        Section {
+            TextField("iPhone name", text: $manualName)
+                .focused($nameFocused)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.next)
+                .onSubmit { passwordFocused = true }
+                .foregroundStyle(theme.textPrimary)
+                .id(Self.nameRowID)
+                .listRowBackground(theme.surface)
+            Picker("Band", selection: $manualBand) {
+                ForEach(ManualBand.allCases) { band in
+                    Text(band.label).tag(band)
+                }
+            }
+            .pickerStyle(.segmented)
+            .listRowBackground(theme.surface)
+        } header: {
+            Text("Hotspot name")
+        } footer: {
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                Text("Your iPhone's name, from Settings › General › About › Name")
+                Text("Pick 2.4 GHz if Maximize Compatibility is on")
+                if !controller.radios.isEmpty, controller.radio(forBand: manualBand.band) == nil {
+                    Text("This router has no \(manualBand.label) radio.")
+                        .foregroundStyle(theme.error)
+                }
+            }
+        }
+    }
+
     // MARK: - The hotspot's password
 
-    private func passwordSection(for hotspot: PhoneDataHotspot) -> some View {
+    private func passwordSection(encryption: String) -> some View {
         Section {
             Group {
-                if hotspot.encryption == "none" {
+                if encryption == "none" {
                     Text("This network is open, so there is no password to enter.")
                         .font(.subheadline)
                         .foregroundStyle(theme.textSecondary)
@@ -298,7 +406,7 @@ struct PhoneDataWifiSetupSheet: View {
         } header: {
             Text("Hotspot password")
         } footer: {
-            passwordFooter(for: hotspot)
+            passwordFooter(encryption: encryption)
         }
     }
 
@@ -333,13 +441,11 @@ struct PhoneDataWifiSetupSheet: View {
     }
 
     @ViewBuilder
-    private func passwordFooter(for hotspot: PhoneDataHotspot) -> some View {
-        if let problem = WifiCredentialRules.passphraseProblem(
-            password, encryption: hotspot.encryption)
-        {
+    private func passwordFooter(encryption: String) -> some View {
+        if let problem = WifiCredentialRules.passphraseProblem(password, encryption: encryption) {
             Text(problem)
                 .foregroundStyle(theme.error)
-        } else if hotspot.encryption != "none" {
+        } else if encryption != "none" {
             Text("You'll find it on your iPhone: Settings › Personal Hotspot › Wi-Fi Password.")
         }
     }
@@ -370,7 +476,7 @@ struct PhoneDataWifiSetupSheet: View {
         }
         .padding(.horizontal, Spacing.md)
         .padding(.vertical, Spacing.sm)
-        .background(.bar)
+        .background(theme.background)
     }
 
     private var connectButton: some View {
@@ -403,16 +509,40 @@ struct PhoneDataWifiSetupSheet: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var needsPassword: Bool {
-        selected.map { $0.encryption != "none" } ?? false
+    /// What the router joins: the network picked from the scan, or the one typed in. A typed-in
+    /// hotspot is joined on the radio of the band picked, and as WPA2/WPA3 mixed, which an
+    /// iPhone's hotspot accepts whichever of the two it uses. Nil while the name is empty or the
+    /// router has no radio on that band.
+    private var target: PhoneDataHotspot? {
+        guard isManual else { return selected }
+        let name = manualName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, let radio = controller.radio(forBand: manualBand.band) else {
+            return nil
+        }
+        return PhoneDataHotspot(
+            ssid: name, device: radio.device, encryption: Self.manualEncryption, signal: nil,
+            band: manualBand.label)
     }
 
-    /// A network is picked and, when it has a password, one the router would accept.
+    private static let manualEncryption = "sae-mixed"
+
+    /// The security to ask the password by: shown as soon as a network is chosen or manual entry
+    /// starts, before the typed name is complete.
+    private var currentEncryption: String? {
+        isManual ? Self.manualEncryption : selected?.encryption
+    }
+
+    private var needsPassword: Bool {
+        currentEncryption.map { $0 != "none" } ?? false
+    }
+
+    /// A network is picked (or typed in) and, when it has a password, one the router would
+    /// accept.
     private var canConnect: Bool {
-        guard let selected, !controller.isBusy else { return false }
-        guard selected.encryption != "none" else { return true }
+        guard let target, !controller.isBusy else { return false }
+        guard target.encryption != "none" else { return true }
         return !password.isEmpty
-            && WifiCredentialRules.passphraseProblem(password, encryption: selected.encryption)
+            && WifiCredentialRules.passphraseProblem(password, encryption: target.encryption)
                 == nil
     }
 
@@ -434,28 +564,62 @@ struct PhoneDataWifiSetupSheet: View {
         if selected?.rowID != hotspot.rowID {
             password = ""
         }
+        isManual = false
         selected = hotspot
     }
 
-    /// Brings the password into view and, for a secured network, puts the cursor in it. The row
-    /// is added by the same update that picked the network, so both wait for it to lay out.
+    /// Switches to typing the hotspot's name. Nothing from the list stays chosen, and a password
+    /// typed for a listed network is no use here.
+    private func selectManual() {
+        guard !controller.isBusy, !isManual else { return }
+        Haptics.selection()
+        password = ""
+        selected = nil
+        isManual = true
+    }
+
+    /// Brings the password into view and, for a secured network, puts the cursor in it; the
+    /// focus change then scrolls once the keyboard is up. The row is added by the same update
+    /// that picked the network, so both wait for it to lay out.
     private func revealPassword(_ proxy: ScrollViewProxy) {
         Task {
             try? await Task.sleep(for: .milliseconds(250))
-            if needsPassword {
+            if needsPassword, !passwordFocused {
                 passwordFocused = true
+            } else {
+                scroll(proxy, to: Self.passwordRowID, afterKeyboard: false)
+            }
+        }
+    }
+
+    /// Puts the cursor in the name field once the row is there; the focus change scrolls to it.
+    private func revealName() {
+        Task {
+            try? await Task.sleep(for: .milliseconds(250))
+            nameFocused = true
+        }
+    }
+
+    /// Scrolls so the field with `id` sits in the upper part of the list, fully above the Connect
+    /// bar. `afterKeyboard` waits for the keyboard to finish rising, which changes how much of
+    /// the list is visible.
+    private func scroll(_ proxy: ScrollViewProxy, to id: String, afterKeyboard: Bool) {
+        Task {
+            if afterKeyboard {
+                try? await Task.sleep(for: .milliseconds(350))
             }
             withAnimation(.snappy) {
-                proxy.scrollTo(Self.passwordRowID, anchor: .center)
+                proxy.scrollTo(id, anchor: Self.fieldAnchor)
             }
         }
     }
 
     private func connect() {
-        guard canConnect, let hotspot = selected, let service = appState.service,
+        guard canConnect, let hotspot = target, let service = appState.service,
             let routerID = appState.phoneDataRouterID
         else { return }
         passwordFocused = false
+        nameFocused = false
         Haptics.impact(.light)
         Task {
             let phone = PhoneDataController.shared

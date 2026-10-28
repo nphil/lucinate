@@ -230,6 +230,7 @@ struct PhoneDataInstructionRow: View {
             Text(LocalizedStringKey(text))
                 .font(.subheadline)
                 .foregroundStyle(theme.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, minHeight: markerSize, alignment: .leading)
         }
         .accessibilityElement(children: .ignore)

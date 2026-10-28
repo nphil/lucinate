@@ -234,7 +234,7 @@ struct PhoneDataView: View {
 
     private func wifiCard(_ state: PhoneDataRouterState) -> some View {
         PhoneDataWifiCard(
-            routerState: state, needsRepair: needsWifiRepair, canRemove: canRemoveWifi,
+            routerState: state, needsRepair: needsWifiRepair,
             isBusy: controller.isBusy, removalMessage: removalMessage(for: .wifi),
             onSetUp: { openWifiSheet(.setUp) },
             onFix: { openWifiSheet(.fix) },
@@ -324,19 +324,9 @@ struct PhoneDataView: View {
 
     private var wifiIsSetUp: Bool { controller.state?.wifiConfigured == true }
 
-    /// Something to remove: the router has the USB setup, or this iPhone remembers it.
-    private var canRemoveUSB: Bool {
-        if controller.state?.configured == true { return true }
-        guard let routerID = appState.phoneDataRouterID else { return false }
-        return PhoneDataController.shared.hasPeer(for: routerID, link: .usb)
-    }
-
-    /// Something to remove: the router has the Wi-Fi setup, or this iPhone remembers it.
-    private var canRemoveWifi: Bool {
-        if controller.state?.wifiConfigured == true { return true }
-        guard let routerID = appState.phoneDataRouterID else { return false }
-        return PhoneDataController.shared.hasPeer(for: routerID, link: .wifi)
-    }
+    /// Something to remove: the router has the USB setup. A key the iPhone keeps from an earlier
+    /// setup is no reason to offer Remove; setting up again replaces it.
+    private var canRemoveUSB: Bool { controller.state?.configured == true }
 
     /// The router reaches this iPhone over Wi-Fi, so it is on the iPhone's hotspot: it isn't on
     /// a network this iPhone can open its settings from.

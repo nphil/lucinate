@@ -44,6 +44,14 @@ final class PhoneDataRouterController {
     private(set) var hotspots: [PhoneDataHotspot] = []
     /// A scan for hotspots is running.
     private(set) var isScanning = false
+    /// The router's Wi-Fi radios, as read by the last scan. What the hotspot's name is typed
+    /// against when the scan doesn't list it.
+    private(set) var radios: [PhoneDataRadio] = []
+
+    /// The radio that works on `band` (2 or 5 GHz), if the router has one.
+    func radio(forBand band: Int) -> PhoneDataRadio? {
+        radios.first { $0.band == band }
+    }
 
     /// When the router's package list was last read. Polling reuses that answer for a while:
     /// reading the list makes the router run apk, the heaviest thing this screen asks of it.
@@ -80,6 +88,7 @@ final class PhoneDataRouterController {
         packagesCheckedAt = nil
         hotspots = []
         isScanning = false
+        radios = []
         scanGeneration += 1
     }
 
@@ -138,10 +147,11 @@ final class PhoneDataRouterController {
             if scanGeneration == generation { isScanning = false }
         }
 
-        let radios = await service.phoneDataScanRadios()
+        let routerRadios = await service.phoneDataRadios()
+        if scanGeneration == generation { radios = routerRadios }
         var found: [WifiScanResult] = []
         await withTaskGroup(of: [WifiScanResult].self) { group in
-            for radio in radios {
+            for radio in routerRadios.map(\.device) {
                 group.addTask { await service.phoneDataScan(radio: radio) }
             }
             for await results in group {

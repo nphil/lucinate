@@ -192,15 +192,18 @@ extension RouterService {
 
     // MARK: - The iPhone's hotspot
 
-    /// The router's Wi-Fi radios (`radio0`, `radio1`, ...), from its wireless config. The two
-    /// usual ones when the config can't be read.
-    func phoneDataScanRadios() async -> [String] {
+    /// The router's Wi-Fi radios and their bands, from its wireless config. `radio0` (2.4 GHz)
+    /// and `radio1` (5 GHz), the two usual ones, when the config can't be read.
+    func phoneDataRadios() async -> [PhoneDataRadio] {
         guard let wireless = try? await uciGet(config: "wireless") else {
-            return ["radio0", "radio1"]
+            return [PhoneDataRadio(device: "radio0", band: 2), PhoneDataRadio(device: "radio1", band: 5)]
         }
-        return TravelmateConfig.orderedSections(wireless)
-            .filter { $0.section[".type"].stringValue == "wifi-device" }
-            .map { $0.name }
+        return PhoneDataRouterConfig.radios(fromWireless: wireless)
+    }
+
+    /// The router's Wi-Fi radios (`radio0`, `radio1`, ...), by name.
+    func phoneDataScanRadios() async -> [String] {
+        await phoneDataRadios().map(\.device)
     }
 
     /// The networks one radio sees now. A radio that is busy, or refuses to scan, sees none: one

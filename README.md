@@ -59,6 +59,19 @@ Swift toolchain.
   router. The app keeps running in the background with a silent audio loop while
   the hotspot is up (sideloaded app; App Store review would reject it). Shortcuts
   action "Use Phone Data" wakes it.
+- **Phone Data over Wi-Fi rides on TravelMate's VPN hook.** The router joins the
+  iPhone's hotspot as a TravelMate uplink with `vpn 1`, `vpnservice wireguard`,
+  `vpniface phone_wifi`; TravelMate brings `phone_wifi` (`auto 0`, `metric 10`,
+  its own router key and tunnel address, so it never fights the USB tunnel) up
+  on that uplink and down on any other. TravelMate tears down every WireGuard
+  interface it knows, so setup writes `trm_vpnifacelist` (never with
+  `phone_wg`); `trm_proactive 1` plus moving the iPhone's STA section first in
+  `wireless` (`uci order`) makes "Hotspot on" win over hotel Wi-Fi. Known limits:
+  TravelMate only starts the tunnel after its own internet check and NTP sync
+  through the hotspot, so a carrier that blocks hotspot traffic outright stops
+  it; if the tunnel can't come up, TravelMate leaves the router on plain hotspot
+  data. While the router uses the hotspot, the iPhone isn't on the router's
+  Wi-Fi and Lucinate can't open the router; the phone-side status still shows.
 - **Session recovery.** LuCI answers an expired session with JSON-RPC -32002
   "Access denied" for every call. The client re-logs in once (shared by
   concurrent callers) and retries; an object missing from the session-free
@@ -96,6 +109,7 @@ Swift toolchain.
 | 5 | Tier B: port forwards + firewall rule toggles, system/kernel log viewer, ping diagnostic | ✅ green |
 | 6 | Polish pass + this README | ✅ |
 | 7 | Phone Data over USB: Go engine, router setup, TravelMate card + screen, Shortcuts | ✅ green (real-router test pending) |
+| 8 | Phone Data over Wi-Fi: TravelMate VPN hook, per-link keys, Wi-Fi setup sheet | ✅ green (real-router test pending) |
 
 ### Not done (Tier C / known gaps)
 
@@ -137,6 +151,11 @@ Swift toolchain.
     hotel Wi-Fi when unplugged, and come back when plugged in again. Check it
     keeps sharing with the screen locked (Settings → Face ID & Passcode → USB
     Accessories on) and after the "Use Phone Data" shortcut.
+11. **Phone Data over Wi-Fi**: Phone Data → Wi-Fi → Set Up with Personal Hotspot
+    open, pick the iPhone, enter the hotspot password, Connect. Then on hotel
+    Wi-Fi turn Personal Hotspot on: within about a minute the router should move
+    to the iPhone and the hero should read "Sharing over Wi-Fi"; hotspot off →
+    back to hotel Wi-Fi. With the cable also plugged in, USB wins.
 
 ## Layout
 

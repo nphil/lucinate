@@ -88,6 +88,15 @@ struct PhoneDataHotspot: Equatable, Sendable {
     var looksLikeIPhone: Bool { ssid.localizedCaseInsensitiveContains("iphone") }
 }
 
+/// One of the router's Wi-Fi radios and the band it works on, for naming the right radio when
+/// the hotspot has to be typed in instead of picked from a scan.
+struct PhoneDataRadio: Equatable, Sendable {
+    /// "radio0", "radio1", ...
+    let device: String
+    /// 2, 5 or 6 (GHz); 0 when the router doesn't say.
+    let band: Int
+}
+
 // MARK: - Errors
 
 /// Failures with a plain-language reason of their own. Everything else keeps the wording
@@ -428,6 +437,33 @@ enum PhoneDataRouterConfig {
         (listing["entries"].arrayValue ?? [])
             .compactMap { $0["name"].stringValue }
             .filter { !$0.isEmpty }
+    }
+
+    // MARK: The router's radios
+
+    /// The `wifi-device` sections of the router's wireless config, in the router's order, with
+    /// the band of each: the modern `band` option, else the legacy `hwmode`, else a guess from
+    /// the channel number.
+    static func radios(fromWireless wireless: JSONValue) -> [PhoneDataRadio] {
+        TravelmateConfig.orderedSections(wireless)
+            .filter { $0.section[".type"].stringValue == "wifi-device" }
+            .map { PhoneDataRadio(device: $0.name, band: band(ofRadio: $0.section)) }
+    }
+
+    private static func band(ofRadio radio: JSONValue) -> Int {
+        switch (radio["band"].coercedString ?? "").lowercased() {
+        case "2g": return 2
+        case "5g": return 5
+        case "6g": return 6
+        default: break
+        }
+        let hwmode = (radio["hwmode"].coercedString ?? "").lowercased()
+        if hwmode.contains("a") { return 5 }
+        if hwmode.contains("g") || hwmode.contains("b") { return 2 }
+        if let channel = Int(radio["channel"].coercedString ?? ""), channel > 0 {
+            return channel <= 14 ? 2 : 5
+        }
+        return 0
     }
 
     // MARK: Finding the iPhone's hotspot
