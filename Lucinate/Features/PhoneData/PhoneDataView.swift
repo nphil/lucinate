@@ -1,5 +1,13 @@
 import SwiftUI
 
+extension AppState {
+    /// Whose Phone Data keys the screens show and set up. Reviewer mode has no saved router, so
+    /// its demo router gets a fixed id there.
+    var phoneDataRouterID: String? {
+        selectedRouterID ?? (isReviewerMode ? "reviewer-demo" : nil)
+    }
+}
+
 /// Phone Data: use this iPhone's mobile data for the router, over USB. Pushed from the card at
 /// the top of the TravelMate tab.
 ///
@@ -46,7 +54,7 @@ struct PhoneDataView: View {
                     refreshNotice
                 }
                 PhoneDataStatusHero(
-                    routerID: appState.selectedRouterID, routerState: controller.state)
+                    routerID: appState.phoneDataRouterID, routerState: controller.state)
                 if needsKeyReset {
                     keyResetBanner
                 } else {
@@ -71,10 +79,10 @@ struct PhoneDataView: View {
         }
         .task(
             id: LoadTrigger(
-                routerID: appState.selectedRouterID, resumeCount: appState.resumeCount)
+                routerID: appState.phoneDataRouterID, resumeCount: appState.resumeCount)
         ) {
-            if lastRouterID != appState.selectedRouterID {
-                lastRouterID = appState.selectedRouterID
+            if lastRouterID != appState.phoneDataRouterID {
+                lastRouterID = appState.phoneDataRouterID
                 controller.reset()
                 unlinkedPolls = 0
                 unseenPolls = 0
@@ -204,7 +212,7 @@ struct PhoneDataView: View {
     private var needsFix: Bool {
         guard controller.loaded, controller.step == .done,
             controller.state?.configured == true,
-            let routerID = appState.selectedRouterID
+            let routerID = appState.phoneDataRouterID
         else { return false }
         if !PhoneDataController.shared.hasPeer(for: routerID) { return true }
         guard let phoneKey else { return false }
@@ -223,7 +231,7 @@ struct PhoneDataView: View {
     /// Something to remove: the router has the setup, or this iPhone remembers the router.
     private var canRemove: Bool {
         if controller.state?.configured == true { return true }
-        guard let routerID = appState.selectedRouterID else { return false }
+        guard let routerID = appState.phoneDataRouterID else { return false }
         return PhoneDataController.shared.hasPeer(for: routerID)
     }
 
@@ -660,7 +668,7 @@ struct PhoneDataView: View {
     /// Finish setup, and also the fix for a link that points at another iPhone: the router
     /// side re-detects the iPhone and writes the link again either way.
     private func finishSetup(isFix: Bool) {
-        guard let service = appState.service, let routerID = appState.selectedRouterID else {
+        guard let service = appState.service, let routerID = appState.phoneDataRouterID else {
             return
         }
         Haptics.impact(.light)
@@ -684,7 +692,7 @@ struct PhoneDataView: View {
     }
 
     private func remove() {
-        guard let service = appState.service, let routerID = appState.selectedRouterID else {
+        guard let service = appState.service, let routerID = appState.phoneDataRouterID else {
             return
         }
         Task {

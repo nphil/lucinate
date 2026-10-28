@@ -187,7 +187,7 @@ struct PhoneDataCard: View {
     var body: some View {
         let phone = PhoneDataController.shared
         let presentation = PhoneDataPresentation.current(
-            phone: phone, routerID: appState.selectedRouterID)
+            phone: phone, routerID: appState.phoneDataRouterID)
         NavigationLink {
             PhoneDataView()
         } label: {
