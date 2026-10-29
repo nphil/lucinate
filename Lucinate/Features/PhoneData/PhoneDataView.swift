@@ -707,8 +707,8 @@ struct PhoneDataView: View {
                 .foregroundStyle(theme.info)
                 .accessibilityHidden(true)
             Text(
-                "Turn on Settings › Face ID & Passcode › USB Accessories, "
-                    + "so sharing keeps working while the iPhone is locked."
+                "Unlock your iPhone when you plug it in. It stays connected after it locks. "
+                    + "If it won't connect, check Settings › Privacy & Security › Wired Accessories."
             )
             .font(.footnote)
             .foregroundStyle(theme.textSecondary)

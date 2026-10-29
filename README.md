@@ -149,8 +149,9 @@ Swift toolchain.
     router's USB port with Personal Hotspot on, tap Trust, Finish. The router
     should then use the iPhone's data (speeds on the screen move), fall back to
     hotel Wi-Fi when unplugged, and come back when plugged in again. Check it
-    keeps sharing with the screen locked (Settings → Face ID & Passcode → USB
-    Accessories on) and after the "Use Phone Data" shortcut.
+    keeps sharing after the screen locks (plug in while unlocked; iOS 26+ keeps the
+    accessory connected, see Settings → Privacy & Security → Wired Accessories) and
+    after the "Use Phone Data" shortcut.
 11. **Phone Data over Wi-Fi**: Phone Data → Wi-Fi → Set Up with Personal Hotspot
     open, pick the iPhone, enter the hotspot password, Connect. Then on hotel
     Wi-Fi turn Personal Hotspot on: within about a minute the router should move
